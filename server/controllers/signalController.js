@@ -111,7 +111,10 @@ const missSignal = async (req, res) => {
       return res.status(400).json({ message: `Signal is already ${signal.status}` });
     }
 
+    const missedAt = new Date();
     signal.status = 'MISSED';
+    signal.missedAt = missedAt;
+    signal.expireAt = new Date(missedAt.getTime() + 8 * 60 * 60 * 1000);
     await signal.save();
     console.log(`[API] Signal manually missed: ${signal.coin} (${signal._id})`);
     res.json(signal);

@@ -9,17 +9,23 @@ const newsRoutes = require("./routes/newsRoutes");
 const { startSignalMonitor, getMonitorStatus } = require("./services/signalMonitor");
 const { startSignalEngine, getEngineStatus, getDynamicThreshold } = require("./services/signalEngine");
 const { initScheduler } = require("./services/scheduler");
+const { enforceSignalRetentionPolicy } = require("./services/signalRetentionService");
 const SystemConfig = require("./models/SystemConfig");
 
 const app = express();
 
-// Rate limiting: 100 requests per 15 minutes
+const isProduction = process.env.NODE_ENV === "production";
+const rateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000);
+const rateLimitMax = Number(process.env.RATE_LIMIT_MAX || (isProduction ? 300 : 2000));
+
+// Rate limiting: configurable for polling-heavy dashboards
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
+  windowMs: rateLimitWindowMs,
+  max: rateLimitMax,
   message: { status: "error", message: "Too many requests, please try again later." },
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => req.path === "/health",
 });
 app.use(limiter);
 
@@ -65,6 +71,7 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 5000;
 
 connectDB().then(async () => {
+  await enforceSignalRetentionPolicy();
   startSignalMonitor();
   await startSignalEngine();
   initScheduler();

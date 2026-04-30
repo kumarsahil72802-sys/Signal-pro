@@ -1,61 +1,61 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react'
 
 const Toast = ({ message, type = 'info', onClose, duration = 5000 }) => {
-  const [isVisible, setIsVisible] = useState(true);
+  const [isVisible, setIsVisible] = useState(true)
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      setIsVisible(false);
-      setTimeout(onClose, 300);
-    }, duration);
+      setIsVisible(false)
+      setTimeout(onClose, 300)
+    }, duration)
 
-    return () => clearTimeout(timer);
-  }, [duration, onClose]);
+    return () => clearTimeout(timer)
+  }, [duration, onClose])
 
   const styles = {
-    info: 'bg-blue-600 text-white',
-    success: 'bg-green-600 text-white',
-    warning: 'bg-yellow-500 text-white',
-    error: 'bg-red-600 text-white',
-    signal: 'bg-purple-600 text-white'
-  };
+    info: 'bg-[#162a45] border-[#35527c] text-[#b8d4ff]',
+    success: 'bg-[#173427] border-[#2a6b4e] text-[#64f2b3]',
+    warning: 'bg-[#3a2d10] border-[#6b551f] text-[#ffd56a]',
+    error: 'bg-[#3b1b26] border-[#6b3040] text-[#ff8fa1]',
+    signal: 'bg-[#2d230a] border-[#7d601c] text-[#f0b90b]'
+  }
 
   const icons = {
-    info: 'ℹ️',
-    success: '✅',
-    warning: '⚠️',
-    error: '❌',
-    signal: '🚀'
-  };
+    info: 'INFO',
+    success: 'DONE',
+    warning: 'WARN',
+    error: 'ERR',
+    signal: 'SIG'
+  }
 
   if (!isVisible) {
     return (
-      <div className="fixed top-20 right-6 z-50 transform translate-x-full opacity-0 transition-all duration-300">
-        <div className={`rounded-lg shadow-lg px-4 py-3 flex items-center gap-3 min-w-[280px] ${styles[type]}`}>
-          <span className="text-xl">{icons[type]}</span>
+      <div className="fixed top-20 right-4 sm:right-6 z-50 transform translate-x-full opacity-0 transition-all duration-300">
+        <div className={`rounded-xl border shadow-lg px-4 py-3 flex items-center gap-3 min-w-[260px] ${styles[type]}`}>
+          <span className="text-[10px] font-bold tracking-wider">{icons[type]}</span>
           <p className="font-medium text-sm">{message}</p>
         </div>
       </div>
-    );
+    )
   }
 
   return (
-    <div className="fixed top-20 right-6 z-50 transform transition-all duration-300 animate-slide-in">
-      <div className={`rounded-lg shadow-lg px-4 py-3 flex items-center gap-3 min-w-[280px] ${styles[type]}`}>
-        <span className="text-xl">{icons[type]}</span>
+    <div className="fixed top-20 right-4 sm:right-6 z-50 transform transition-all duration-300 animate-slide-in">
+      <div className={`rounded-xl border shadow-lg px-4 py-3 flex items-center gap-3 min-w-[260px] ${styles[type]}`}>
+        <span className="text-[10px] font-bold tracking-wider">{icons[type]}</span>
         <p className="font-medium text-sm">{message}</p>
-        <button 
+        <button
           onClick={() => {
-            setIsVisible(false);
-            setTimeout(onClose, 300);
+            setIsVisible(false)
+            setTimeout(onClose, 300)
           }}
-          className="ml-auto text-white/70 hover:text-white transition-colors"
+          className="ml-auto opacity-70 hover:opacity-100 transition-opacity"
         >
-          ✕
+          x
         </button>
       </div>
     </div>
-  );
-};
+  )
+}
 
-export default Toast;
+export default Toast

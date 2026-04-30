@@ -1,5 +1,6 @@
 const { getLivePrice, getBatchPrices } = require('./binanceService');
 const Signal = require('../models/Signal');
+const { logTrade } = require('./tradeLogger');
 
 // 8 hours TTL for missed opportunities
 const MISSED_OPPORTUNITY_TTL_MS = 8 * 60 * 60 * 1000;
@@ -36,9 +37,12 @@ async function processTakenSignal(signal, livePrice, result) {
   await Signal.findByIdAndUpdate(signal._id, {
     status: 'CLOSED',
     result,
-    wasTaken: true,  // Flag to distinguish TAKEN→CLOSED from ACTIVE→CLOSED
+    wasTaken: true,
     closedAt: new Date()
   });
+
+  // Feed AI learning stats with real taken-trade outcomes.
+  await logTrade(signal, result, livePrice);
 
   return { closed: true, missed: false };
 }
@@ -184,3 +188,4 @@ function getMonitorStatus() {
 }
 
 module.exports = { startSignalMonitor, monitorSignals, getMonitorStatus };
+

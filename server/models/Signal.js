@@ -29,8 +29,25 @@ const signalSchema = new mongoose.Schema({
     volume: { type: String, default: 'LOW' },
     rsi: { type: String, default: 'NEUTRAL' },
     macd: { type: String, default: 'NEUTRAL' },
-    sentiment: { type: String, default: 'NEUTRAL' }
+    sentiment: { type: String, default: 'NEUTRAL' },
+    rsiValue: { type: Number },
+    deltaRatio: { type: String },
+    volumeConfirmed: { type: String, default: 'NEUTRAL' }
   },
+  trigger: {
+    type: String,
+    enum: ['EMA_TEST', 'EMA_ZONE', 'CROSSOVER', 'VOLATILITY_BREAKOUT', 'UNKNOWN'],
+    default: 'UNKNOWN'
+  },
+  regime: { type: String, default: null },
+  higherTimeframeTrend: { type: String, default: null },
+  aiScore: { type: Number, min: 0, max: 100, default: null },
+  aiDecision: {
+    type: String,
+    enum: ['STRONG_APPROVE', 'APPROVE', 'WEAK_APPROVE', 'REJECT'],
+    default: null
+  },
+  aiMessage: { type: String, default: null },
   status: {
     type: String,
     enum: ['ACTIVE', 'TAKEN', 'MISSED', 'CLOSED'],
@@ -48,11 +65,17 @@ const signalSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
   expireAt: {
     type: Date,
-    default: () => new Date(Date.now() + 8 * 60 * 60 * 1000)
+    default: null
   }
 });
 
-signalSchema.index({ expireAt: 1 }, { expireAfterSeconds: 0 });
+signalSchema.index(
+  { expireAt: 1 },
+  {
+    expireAfterSeconds: 0,
+    partialFilterExpression: { status: 'MISSED' }
+  }
+);
 signalSchema.index({ status: 1 });
 
 module.exports = mongoose.model('Signal', signalSchema);

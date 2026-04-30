@@ -1,8 +1,11 @@
-const { getKlines, getLivePrice } = require('./binanceService');
+const { getKlines, getLivePrice, getTopUsdtSymbols } = require('./binanceService');
 const { getTopCoins } = require('./coingeckoService');
+const { getExecutionQualityForSymbols } = require('./executionQualityService');
 const Signal = require('../models/Signal');
 const SystemConfig = require('../models/SystemConfig');
 const { saveTradeSnapshot } = require('./tradeService'); // Integration: Import trade logger
+const { enhancedAnalyze } = require('./aiAnalyst');
+
 
 /**
  * INTEGRATION HINT:
@@ -26,7 +29,14 @@ const { saveTradeSnapshot } = require('./tradeService'); // Integration: Import 
 // ============================================================================
 // CONFIGURATION
 // ============================================================================
-const COINS = (process.env.SIGNAL_COINS || 'BTCUSDT').split(',').map(c => c.trim().toUpperCase());
+const COIN_SELECTOR = (process.env.SIGNAL_COINS || 'TOP50').trim().toUpperCase();
+const SIGNAL_TOP_COINS = Math.max(1, Number(process.env.SIGNAL_TOP_COINS || 50));
+const SIGNAL_MAX_COINS = Math.max(1, Number(process.env.SIGNAL_MAX_COINS || 120));
+const SIGNAL_MIN_24H_QUOTE_VOLUME_USDT = Math.max(0, Number(process.env.SIGNAL_MIN_24H_QUOTE_VOLUME_USDT || 2000000));
+const SIGNAL_USE_EXECUTION_QUALITY = String(process.env.SIGNAL_USE_EXECUTION_QUALITY || 'true').trim().toLowerCase() !== 'false';
+const COIN_LIST_REFRESH_MS = 15 * 60 * 1000; // 15 minutes
+const TRADABLE_SYMBOL_CACHE_MS = 15 * 60 * 1000; // 15 minutes
+const TRADABLE_SYMBOL_FETCH_LIMIT = 1500;
 const INTERVAL = process.env.SIGNAL_INTERVAL || '1h';
 const CANDLE_COUNT = 100;      // 100 candles for accurate RSI/MACD calculation
 const TREND_CANDLES = 22;     // Need 22 for EMA 21 + previous
@@ -59,6 +69,114 @@ let lastLearningCheck = 0;
 // Engine status for health monitoring
 let engineRunning = false;
 let engineStartTime = null;
+let cachedResolvedCoins = [];
+let cachedCoinListUntil = 0;
+let cachedTradableSymbols = new Set();
+let cachedTradableSymbolsUntil = 0;
+
+const STABLE_BASE_ASSETS = new Set([
+  'USDT', 'USDC', 'BUSD', 'FDUSD', 'TUSD', 'USDP', 'DAI', 'USDE', 'USD1', 'PYUSD'
+]);
+
+function parseTopSelector(selector) {
+  const match = selector.match(/^TOP(\d{1,3})$/);
+  if (!match) return null;
+  return Number(match[1]);
+}
+
+function normalizeCoinToken(token) {
+  const normalized = token.trim().toUpperCase();
+  if (!normalized) return null;
+  if (/^[A-Z0-9]+USDT$/.test(normalized)) return normalized;
+  if (/^[A-Z0-9]+$/.test(normalized)) return `${normalized}USDT`;
+  return null;
+}
+
+function dedupeCoins(coins) {
+  return [...new Set(coins)];
+}
+
+function filterStableBasePairs(coins) {
+  return coins.filter((symbol) => {
+    const base = symbol.replace(/USDT$/, '');
+    return !STABLE_BASE_ASSETS.has(base);
+  });
+}
+
+async function getTradableUsdtSymbolSet() {
+  const now = Date.now();
+  if (now < cachedTradableSymbolsUntil && cachedTradableSymbols.size > 0) {
+    return cachedTradableSymbols;
+  }
+
+  const tradableSymbols = await getTopUsdtSymbols({
+    limit: TRADABLE_SYMBOL_FETCH_LIMIT,
+    minQuoteVolume: 0,
+    excludeStableBases: true
+  });
+
+  cachedTradableSymbols = new Set(tradableSymbols);
+  cachedTradableSymbolsUntil = now + TRADABLE_SYMBOL_CACHE_MS;
+  return cachedTradableSymbols;
+}
+
+async function resolveCoins(topCoins = []) {
+  const now = Date.now();
+  if (now < cachedCoinListUntil && cachedResolvedCoins.length > 0) {
+    return cachedResolvedCoins;
+  }
+
+  let coins = [];
+
+  if (COIN_SELECTOR === 'ALL') {
+    coins = await getTopUsdtSymbols({
+      limit: SIGNAL_MAX_COINS,
+      minQuoteVolume: SIGNAL_MIN_24H_QUOTE_VOLUME_USDT,
+      excludeStableBases: true
+    });
+  } else {
+    const topCount = parseTopSelector(COIN_SELECTOR);
+    if (topCount) {
+      const requestedCount = Math.min(topCount, SIGNAL_MAX_COINS);
+      const sourceTopCoins = topCoins.length > 0
+        ? topCoins
+        : await getTopCoins(Math.max(SIGNAL_TOP_COINS, requestedCount));
+
+      coins = sourceTopCoins
+        .map((coin) => normalizeCoinToken(String(coin.symbol || '')))
+        .filter(Boolean)
+        .slice(0, requestedCount);
+    } else {
+      coins = COIN_SELECTOR
+        .split(',')
+        .map(normalizeCoinToken)
+        .filter(Boolean);
+    }
+  }
+
+  coins = filterStableBasePairs(dedupeCoins(coins)).slice(0, SIGNAL_MAX_COINS);
+
+  try {
+    const tradableSet = await getTradableUsdtSymbolSet();
+    const beforeCount = coins.length;
+    coins = coins.filter((symbol) => tradableSet.has(symbol));
+    const removedCount = beforeCount - coins.length;
+    if (removedCount > 0) {
+      console.log(`[ENGINE] Filtered out ${removedCount} non-tradable Binance pairs.`);
+    }
+  } catch (error) {
+    console.log(`[ENGINE] Tradable symbol validation skipped: ${error.message}`);
+  }
+
+  if (coins.length === 0) {
+    coins = ['BTCUSDT'];
+    console.log('[ENGINE] Coin resolution returned empty list, falling back to BTCUSDT.');
+  }
+
+  cachedResolvedCoins = coins;
+  cachedCoinListUntil = now + COIN_LIST_REFRESH_MS;
+  return coins;
+}
 
 // ============================================================================
 // THRESHOLD PERSISTENCE FUNCTIONS
@@ -1761,6 +1879,45 @@ function runQualityFilters(confidence, volumeData, momentum) {
   return { passed: true, reason: 'Quality checks passed' };
 }
 
+function applyExecutionQualityAdjustment(confidence, qualityData) {
+  if (!qualityData || qualityData.unavailable) {
+    return {
+      adjustedConfidence: confidence,
+      adjustment: 0,
+      shouldBlock: false,
+      reason: 'execution quality unavailable (fail-open)'
+    };
+  }
+
+  const executionQuality = String(qualityData.executionQuality || '').toUpperCase();
+  const slippageRisk = String(qualityData.slippageRisk || '').toUpperCase();
+
+  const riskyExecution = executionQuality === 'RISKY';
+  const highSlippage = slippageRisk === 'HIGH';
+  const goodExecution = executionQuality === 'GOOD';
+  const lowSlippage = slippageRisk === 'LOW';
+
+  let adjustment = 0;
+  if (riskyExecution && highSlippage) {
+    adjustment = -20;
+  } else if (riskyExecution || highSlippage) {
+    adjustment = -10;
+  } else if (goodExecution && lowSlippage) {
+    adjustment = 4;
+  }
+
+  const adjustedConfidence = Math.max(0, Math.min(100, confidence + adjustment));
+  const hardBlockFloor = Math.max(getConfidenceThreshold() + 5, 70);
+  const shouldBlock = riskyExecution && highSlippage && adjustedConfidence < hardBlockFloor;
+
+  return {
+    adjustedConfidence,
+    adjustment,
+    shouldBlock,
+    reason: `execution:${executionQuality || 'UNKNOWN'} slippage:${slippageRisk || 'UNKNOWN'}`
+  };
+}
+
 async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN') {
   // Check 1: Active signal exists (duplicate protection)
   const activeSignal = await Signal.findOne({ coin, status: 'ACTIVE' });
@@ -1879,6 +2036,11 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   const rsiCloses = allCloses.slice(-15);
   const rsi = calculateRSI(rsiCloses);
 
+  // PREPARE FOR AI LAYER: Calculate previous RSI
+  const prevRsiCloses = allCloses.slice(-16, -1);
+  const prevRsi = calculateRSI(prevRsiCloses);
+
+
   // RSI history for momentum boost calculation
   const rsiHistory = [];
   for (let i = 3; i <= 10; i += 3) {
@@ -1898,9 +2060,9 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   if (bbData) {
     bbWidthPercent = (bbData.upper - bbData.lower) / bbData.middle * 100;
     
-    const prevBbData = calculateBollingerBands(allCloses.slice(0, -20), 20);
+    const prevBbData = calculateBollingerBands(allCloses.slice(0, -1), 20);
     if (prevBbData) {
-      bbExpanding = bbData.width > prevBbData.width;
+      bbExpanding = bbData.bandwidth > prevBbData.bandwidth;
     }
   }
 
@@ -1977,14 +2139,17 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   let confidence = Math.max(0, Math.min(100, baseConfidence + confidenceBoost + confidencePenalty + weakPenalty + volumeDeltaPenalty + btcConfidencePenalty));
 
   // Determine signal quality level
-  const signalQuality = getSignalQuality(confidence);
+  let fourHPenalty = 0;
+  let executionAdjustment = 0;
+  let executionQualityData = null;
+  let signalQuality = getSignalQuality(confidence);
   if (!signalQuality) {
     console.log(`[Engine] ${coin} skipped → Confidence below minimum (${confidence}%)`);
     return null;
   }
 
   // Run quality filters before saving (only confidence threshold check)
-  const qualityCheck = runQualityFilters(confidence, volumeData, momentum);
+  let qualityCheck = runQualityFilters(confidence, volumeData, momentum);
   if (!qualityCheck.passed) {
     console.log(`[Engine] ${coin} skipped → ${qualityCheck.reason} (confidence: ${confidence}%)`);
     return null;
@@ -2030,7 +2195,8 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
       if (fourHTrend === 'bearish' && fourHStrength === 'weak') {
         // DO NOT BLOCK: Weak bearish - apply -15 confidence penalty instead
         console.log(`[ENGINE] ${coin} 4H FILTER → Weak bearish 4H detected, applying -15 penalty | 4H:${fourHTrend} ${fourHStrength} slope:${fourHSlope.toFixed(3)}%`);
-        confidence = Math.max(0, confidence - 15);
+        fourHPenalty = -15;
+        confidence = Math.max(0, confidence + fourHPenalty);
       }
       // If 4H is bullish or neutral: DO NOT block, keep existing bonus (no change)
     }
@@ -2066,13 +2232,46 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
       if (fourHTrend === 'bullish' && fourHStrength === 'weak') {
         // DO NOT BLOCK: Weak bullish - apply -15 confidence penalty instead
         console.log(`[ENGINE] ${coin} 4H FILTER → Weak bullish 4H detected, applying -15 penalty | 4H:${fourHTrend} ${fourHStrength} slope:${fourHSlope.toFixed(3)}%`);
-        confidence = Math.max(0, confidence - 15);
+        fourHPenalty = -15;
+        confidence = Math.max(0, confidence + fourHPenalty);
       }
       // If 4H is bearish or neutral: DO NOT block, keep existing bonus (no change)
     }
   } else {
     // 4H data unavailable - fail open (continue normally)
     console.log(`[Engine] 4H data unavailable for ${coin}, skipping hard filter`);
+  }
+
+  // Execution quality integration (spread + slippage + liquidity)
+  if (SIGNAL_USE_EXECUTION_QUALITY) {
+    try {
+      const qualityMap = await getExecutionQualityForSymbols([coin]);
+      executionQualityData = qualityMap?.[coin] || null;
+    } catch (error) {
+      console.log(`[Engine] ${coin} execution quality fetch failed (fail-open): ${error.message}`);
+    }
+
+    const executionDecision = applyExecutionQualityAdjustment(confidence, executionQualityData);
+    confidence = executionDecision.adjustedConfidence;
+    executionAdjustment = executionDecision.adjustment;
+
+    if (executionDecision.shouldBlock) {
+      console.log(`[ENGINE] ${coin} BLOCKED â†’ Illiquid execution conditions (${executionDecision.reason}) | confidence:${confidence}%`);
+      return null;
+    }
+  }
+
+  // Final quality gate after all confidence adjustments
+  signalQuality = getSignalQuality(confidence);
+  if (!signalQuality) {
+    console.log(`[Engine] ${coin} skipped â†’ Final confidence below minimum (${confidence}%)`);
+    return null;
+  }
+
+  qualityCheck = runQualityFilters(confidence, volumeData, momentum);
+  if (!qualityCheck.passed) {
+    console.log(`[Engine] ${coin} skipped â†’ Final ${qualityCheck.reason} (confidence: ${confidence}%)`);
+    return null;
   }
 
   // Build signal reasons
@@ -2089,7 +2288,7 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
     technical: Math.round(technicalScore * 0.7),
     market: normalizedMarketScore,
     bonus: confidenceBoost,
-    penalty: confidencePenalty + weakPenalty + volumeDeltaPenalty
+    penalty: confidencePenalty + weakPenalty + volumeDeltaPenalty + btcConfidencePenalty + fourHPenalty + executionAdjustment
   };
   // Add rsi and macd to reason
   reasons.rsi = rsi > 70 ? 'OVERBOUGHT' : rsi < 30 ? 'OVERSOLD' : rsi > 55 ? 'BULLISH' : rsi < 45 ? 'BEARISH' : 'NEUTRAL';
@@ -2097,14 +2296,12 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   // Add volume delta info to reason
   reasons.deltaRatio = volumeDelta.deltaRatio.toFixed(2);
   reasons.volumeConfirmed = volumeDelta.buyDominant ? 'BUY_DOMINANT' : volumeDelta.sellDominant ? 'SELL_DOMINANT' : 'NEUTRAL';
+  reasons.execution = executionQualityData?.executionQuality || 'UNKNOWN';
+  reasons.slippageRisk = executionQualityData?.slippageRisk || 'UNKNOWN';
   signalData.reason = reasons;
+  signalData.trigger = trigger;
+  signalData.regime = regime;
   signalData.higherTimeframeTrend = higherTimeframeTrend ? higherTimeframeTrend.trend : null;
-
-  const signal = new Signal(signalData);
-  await signal.save();
-
-  // Record cooldown timestamp
-  lastSignalTimes.set(coin, Date.now());
 
   const reasonStr = Object.entries(reasons)
     .filter(([k]) => k !== 'rsiValue')
@@ -2114,8 +2311,44 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   // Volume delta confirmation status for logging
   const volumeConfirmed = volumeDelta.buyDominant ? 'BUY_DOMINANT' : volumeDelta.sellDominant ? 'SELL_DOMINANT' : 'NEUTRAL';
 
-  console.log(`[ENGINE] ${coin} SIGNAL CREATED → Trigger:${trigger} | Quality:${signalQuality} | Confidence:${confidence}% | ${trend} | Price:${currentPrice} | ATR:${atr.toFixed(2)} | Target:${signalData.target} | SL:${signalData.stopLoss} | deltaRatio:${volumeDelta.deltaRatio.toFixed(2)} | volumeConfirmed:${volumeConfirmed} | ${reasonStr}`);
+  console.log(`[ENGINE] ${coin} SIGNAL CANDIDATE → Trigger:${trigger} | Quality:${signalQuality} | Confidence:${confidence}% | ${trend} | Price:${currentPrice} | ATR:${atr.toFixed(2)} | Target:${signalData.target} | SL:${signalData.stopLoss} | deltaRatio:${volumeDelta.deltaRatio.toFixed(2)} | volumeConfirmed:${volumeConfirmed} | ${reasonStr}`);
+
+  // STEP 3: APPLY AI ADJUSTMENT LAYER (Enhanced with Learning)
+  // We decorate the signal object with extra context needed for AI logic
+  const signalToAdjust = {
+    ...signalData,
+    rsi,
+    prevRsi,
+    volumeSpike: volumeData.isSpike,
+    btcTrend,
+    trendStrength: signalQuality,
+    isLateEntry: false
+  };
+
+  const adjustedSignal = await enhancedAnalyze(signalToAdjust);
+  if (!adjustedSignal) {
+    return null;
+  }
+
+  if (adjustedSignal.aiDecision === 'REJECT') {
+    console.log(`[ENGINE] ${coin} BLOCKED → AI Learning rejected signal (score:${adjustedSignal.aiScore})`);
+    return null;
+  }
+
+  signalData.aiScore = adjustedSignal.aiScore;
+  signalData.aiDecision = adjustedSignal.aiDecision;
+  signalData.aiMessage = adjustedSignal.aiMessage;
+
+  const signal = new Signal(signalData);
+  await signal.save();
+
+  // Record cooldown timestamp
+  lastSignalTimes.set(coin, Date.now());
+
+  console.log(`[ENGINE] ${coin} SIGNAL CREATED → id:${signal._id} | trigger:${trigger} | ai:${signalData.aiDecision} (${signalData.aiScore})`);
+
   return signal;
+
 }
 
 // ============================================================================
@@ -2247,17 +2480,30 @@ async function runEngine() {
   let created = 0;
 
   // Fetch market data once for all coins to avoid rate limiting
+  const topSelectorCount = parseTopSelector(COIN_SELECTOR) || 0;
+  const marketDataLimit = Math.min(250, Math.max(50, SIGNAL_TOP_COINS, topSelectorCount));
   let topCoins = [];
   try {
-    topCoins = await getTopCoins(50);
+    topCoins = await getTopCoins(marketDataLimit);
   } catch (err) {
     console.log(`[ENGINE] Failed to fetch market data: ${err.message}`);
   }
 
+  // Resolve coin universe for this cycle
+  let coinsToAnalyze = [];
+  try {
+    coinsToAnalyze = await resolveCoins(topCoins);
+  } catch (err) {
+    console.log(`[ENGINE] Failed to resolve coin list: ${err.message}`);
+    coinsToAnalyze = ['BTCUSDT'];
+  }
+
+  console.log(`[ENGINE] Analyzing ${coinsToAnalyze.length} coin(s). Selector: ${COIN_SELECTOR}`);
+
   // Fetch global BTC trend once per cycle to avoid redundant API calls
   const btcTrend = await getBTCTrend();
 
-  for (const coin of COINS) {
+  for (const coin of coinsToAnalyze) {
     try {
       const signal = await generateSignalForCoin(coin, topCoins, btcTrend);
       if (signal) created++;
@@ -2282,7 +2528,7 @@ async function startSignalEngine() {
 
   runEngine();
   setInterval(runEngine, CHECK_INTERVAL_MS);
-  console.log(`[ENGINE] Started. Monitoring ${COINS.join(', ')} every ${CHECK_INTERVAL_MS / 60000}min.`);
+  console.log(`[ENGINE] Started. Selector:${COIN_SELECTOR} | Interval:${CHECK_INTERVAL_MS / 60000}min | MaxCoins:${SIGNAL_MAX_COINS}`);
 }
 
 /**

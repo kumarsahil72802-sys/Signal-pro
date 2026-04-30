@@ -60,7 +60,7 @@ async function getTopCoins(perPage = 10) {
           order: 'market_cap_desc',
           per_page: perPage,
           page: 1,
-          sparkline: false,
+          sparkline: true,
         },
         timeout: 10000,
         headers: {
@@ -74,6 +74,9 @@ async function getTopCoins(perPage = 10) {
         current_price: coin.current_price,
         price_change_percentage_24h: coin.price_change_percentage_24h,
         image: coin.image,
+        sparkline_in_7d: {
+          price: Array.isArray(coin.sparkline_in_7d?.price) ? coin.sparkline_in_7d.price : []
+        }
       }));
 
       // Store in cache
