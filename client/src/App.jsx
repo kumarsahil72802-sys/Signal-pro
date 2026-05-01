@@ -6,11 +6,31 @@ const CORE_REFRESH_MS = 3000
 const NEWS_REFRESH_MS = 20000
 const QUALITY_DEBOUNCE_MS = 250
 const QUALITY_MIN_GAP_MS = 3000
-const MARKET_CACHE_KEY = 'signal.market.snapshot.v1'
+const MARKET_CACHE_KEY = 'signal.market.snapshot.v2'
+const MARKET_FETCH_LIMIT = 140
+const MAX_QUALITY_MARKET_SYMBOLS = 50
 const EXCLUDED_QUALITY_BASES = new Set(['USDT', 'USDC', 'BUSD', 'FDUSD', 'TUSD', 'USDP', 'DAI', 'USDE', 'USD1', 'PYUSD'])
+const EXCLUDED_MARKET_BASES = new Set(['USDT', 'USDC', 'BUSD', 'FDUSD', 'TUSD', 'USDP', 'DAI', 'USDE', 'USD1', 'PYUSD'])
 
 function normalizeSymbol(symbol) {
   return String(symbol || '').trim().toUpperCase()
+}
+
+function sanitizeMarketData(rawData = []) {
+  if (!Array.isArray(rawData)) return []
+
+  return rawData.filter((coin) => {
+    const symbol = normalizeSymbol(coin?.symbol)
+    if (!symbol || EXCLUDED_MARKET_BASES.has(symbol)) return false
+
+    const source = String(coin?.source || '').trim().toLowerCase()
+    if (source !== 'binance') return false
+
+    const price = Number(coin?.current_price)
+    if (!Number.isFinite(price) || price <= 0) return false
+
+    return true
+  })
 }
 
 function isEligibleQualitySymbol(symbol) {
@@ -21,6 +41,7 @@ function isEligibleQualitySymbol(symbol) {
 
 function buildQualitySymbols(marketData = [], signalData = []) {
   const marketSymbols = marketData
+    .slice(0, MAX_QUALITY_MARKET_SYMBOLS)
     .map((coin) => `${normalizeSymbol(coin.symbol)}USDT`)
     .filter(isEligibleQualitySymbol)
 
@@ -36,7 +57,7 @@ function loadCachedMarket() {
     const raw = localStorage.getItem(MARKET_CACHE_KEY)
     if (!raw) return []
     const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
+    return sanitizeMarketData(parsed)
   } catch {
     return []
   }
@@ -158,8 +179,8 @@ function App() {
 
   const fetchMarket = async () => {
     try {
-      const res = await getMarketData()
-      const marketData = res.data || []
+      const res = await getMarketData(MARKET_FETCH_LIMIT)
+      const marketData = sanitizeMarketData(res.data || [])
       marketRef.current = marketData
       setMarket(marketData)
       localStorage.setItem(MARKET_CACHE_KEY, JSON.stringify(marketData))
@@ -308,11 +329,14 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen text-[#d7e1f3] relative">
-      <div className="pointer-events-none absolute inset-0 opacity-40" style={{
-        backgroundImage: 'linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px)',
-        backgroundSize: '40px 40px'
+    <div className="min-h-screen text-[#d7e1f3] relative overflow-hidden">
+      <div className="pointer-events-none absolute inset-0 opacity-30" style={{
+        backgroundImage: 'linear-gradient(rgba(125,169,230,0.14) 1px, transparent 1px), linear-gradient(90deg, rgba(125,169,230,0.14) 1px, transparent 1px)',
+        backgroundSize: '48px 48px'
       }} />
+      <div className="pointer-events-none absolute -left-20 top-24 h-72 w-72 rounded-full bg-[#ffbe2e]/20 blur-[120px]" />
+      <div className="pointer-events-none absolute right-0 top-10 h-96 w-96 rounded-full bg-[#5fd5ff]/16 blur-[130px]" />
+      <div className="pointer-events-none absolute -bottom-16 left-1/3 h-80 w-80 rounded-full bg-[#234a86]/24 blur-[150px]" />
 
       <NavTabs
         activeTab={activeTab}
@@ -330,21 +354,24 @@ function App() {
         />
       )}
 
-      <main className="relative max-w-6xl mx-auto px-4 sm:px-6 py-8">
+      <main className="relative max-w-7xl mx-auto px-4 sm:px-6 py-8">
         {renderContent()}
       </main>
 
-      <footer className="relative border-t border-[#22304b] bg-[#0a1020]/80 mt-10">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 py-5">
+      <footer className="relative border-t border-[#2b4267] bg-[linear-gradient(180deg,rgba(7,14,27,0.92),rgba(7,14,26,0.78))] mt-10">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-5">
           <div className="flex items-center justify-center gap-3">
-            <img
-              src="/coinchakra.jpeg"
-              alt="CoinChakra"
-              className="w-7 h-7 rounded-md object-cover border border-[#2f3f5c]"
-              loading="lazy"
-            />
-            <p className="text-center text-sm text-[#8ea0c0]">
-              CoinChakra | Auto-refreshing crypto signal terminal
+            <div className="cc-brand-shell cc-brand-shell-sm">
+              <span className="cc-brand-ring cc-brand-ring-a" />
+              <img
+                src="/coinchakra.jpeg"
+                alt="CoinChakra"
+                className="cc-brand-core"
+                loading="lazy"
+              />
+            </div>
+            <p className="text-center text-sm text-[#9ab3d9]">
+              CoinChakra | Real-time signal observatory for fast conviction trading
             </p>
           </div>
         </div>

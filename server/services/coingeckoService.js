@@ -69,11 +69,22 @@ async function getTopCoins(perPage = 10) {
       });
 
       const data = response.data.map((coin) => ({
+        id: coin.id,
         name: coin.name,
         symbol: coin.symbol,
         current_price: coin.current_price,
         price_change_percentage_24h: coin.price_change_percentage_24h,
         image: coin.image,
+        market_cap: coin.market_cap,
+        market_cap_rank: coin.market_cap_rank,
+        total_volume: coin.total_volume,
+        high_24h: coin.high_24h,
+        low_24h: coin.low_24h,
+        ath: coin.ath,
+        atl: coin.atl,
+        circulating_supply: coin.circulating_supply,
+        total_supply: coin.total_supply,
+        max_supply: coin.max_supply,
         sparkline_in_7d: {
           price: Array.isArray(coin.sparkline_in_7d?.price) ? coin.sparkline_in_7d.price : []
         }

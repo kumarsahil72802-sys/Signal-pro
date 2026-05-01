@@ -1,20 +1,21 @@
-@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap');
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  --cc-bg: #06090f;
-  --cc-panel: #0f1726;
-  --cc-panel-soft: #151f31;
-  --cc-border: #263248;
-  --cc-text: #d7e1f3;
-  --cc-text-soft: #92a4c2;
-  --cc-accent: #f0b90b;
-  --cc-accent-soft: rgba(240, 185, 11, 0.2);
-  --cc-positive: #19c37d;
-  --cc-negative: #f6465d;
-  --cc-cyan: #2ad8ff;
+  --cc-bg: #04070d;
+  --cc-bg-deep: #010309;
+  --cc-panel: #0d1a2d;
+  --cc-panel-soft: #132541;
+  --cc-border: #2b4469;
+  --cc-text: #dbe8ff;
+  --cc-text-soft: #8ea8d3;
+  --cc-accent: #ffbe2e;
+  --cc-accent-soft: rgba(255, 190, 46, 0.22);
+  --cc-positive: #33d59f;
+  --cc-negative: #ff6f8d;
+  --cc-cyan: #5fd5ff;
 }
 
 * {
@@ -28,20 +29,26 @@ body {
 }
 
 body {
-  font-family: 'Manrope', 'Segoe UI', sans-serif;
+  font-family: 'Plus Jakarta Sans', 'Segoe UI', sans-serif;
   color: var(--cc-text);
   background:
-    radial-gradient(circle at 12% 14%, rgba(240, 185, 11, 0.12), transparent 34%),
-    radial-gradient(circle at 86% 0%, rgba(42, 216, 255, 0.12), transparent 30%),
-    linear-gradient(180deg, #05080f 0%, #06090f 36%, #05070d 100%);
+    radial-gradient(circle at 11% 16%, rgba(255, 190, 46, 0.15), transparent 38%),
+    radial-gradient(circle at 84% 0%, rgba(95, 213, 255, 0.14), transparent 34%),
+    radial-gradient(circle at 62% 74%, rgba(43, 95, 184, 0.1), transparent 38%),
+    linear-gradient(170deg, #02040a 0%, #04070d 42%, #050912 100%);
 }
 
 h1,
 h2,
 h3,
 h4 {
-  font-family: 'Sora', 'Manrope', sans-serif;
+  font-family: 'Space Grotesk', 'Plus Jakarta Sans', sans-serif;
   letter-spacing: -0.015em;
+}
+
+code,
+.cc-mono {
+  font-family: 'IBM Plex Mono', monospace;
 }
 
 #root {
@@ -79,6 +86,118 @@ h4 {
 
 .animate-slide-in {
   animation: slide-in-right 0.35s ease-out;
+}
+
+@keyframes orbit-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes pulse-ridge {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scaleX(0.96);
+  }
+  50% {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+}
+
+.cc-glass {
+  background: linear-gradient(150deg, rgba(12, 28, 51, 0.88), rgba(10, 21, 39, 0.92));
+  border: 1px solid rgba(74, 114, 170, 0.5);
+  box-shadow: 0 20px 45px rgba(2, 6, 16, 0.46);
+  backdrop-filter: blur(14px);
+}
+
+.cc-noise {
+  position: relative;
+}
+
+.cc-noise::after {
+  content: '';
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.08) 0.65px, transparent 0.65px);
+  background-size: 3px 3px;
+  mix-blend-mode: soft-light;
+  opacity: 0.12;
+}
+
+.cc-orbit {
+  animation: orbit-spin 22s linear infinite;
+}
+
+.cc-ridge {
+  animation: pulse-ridge 2.8s ease-in-out infinite;
+}
+
+.cc-brand-shell {
+  position: relative;
+  width: 54px;
+  height: 54px;
+  border-radius: 18px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(92, 129, 182, 0.7);
+  background: linear-gradient(145deg, rgba(21, 43, 72, 0.95), rgba(14, 28, 48, 0.92));
+  box-shadow: 0 16px 30px rgba(4, 10, 23, 0.55), 0 0 0 1px rgba(255, 190, 46, 0.1) inset;
+  overflow: hidden;
+}
+
+.cc-brand-shell-sm {
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+}
+
+.cc-brand-core {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  object-fit: cover;
+  object-position: 48% 24%;
+  border: 1px solid rgba(94, 127, 176, 0.8);
+  position: relative;
+  z-index: 2;
+  transform: scale(2.05);
+}
+
+.cc-brand-shell-sm .cc-brand-core {
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  object-position: 48% 24%;
+  transform: scale(2.1);
+}
+
+.cc-brand-ring {
+  position: absolute;
+  inset: 4px;
+  border-radius: 16px;
+  pointer-events: none;
+}
+
+.cc-brand-shell-sm .cc-brand-ring {
+  inset: 2px;
+  border-radius: 10px;
+}
+
+.cc-brand-ring-a {
+  border: 1px solid rgba(95, 213, 255, 0.33);
+  transform: rotate(6deg);
+}
+
+.cc-brand-ring-b {
+  border: 1px solid rgba(255, 190, 46, 0.34);
+  transform: rotate(-8deg);
 }
 
 .line-clamp-2 {

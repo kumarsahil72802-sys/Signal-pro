@@ -145,7 +145,7 @@ function FeaturedNewsCard({ article }) {
         {article.url && (
           <span className="inline-flex items-center gap-2 mt-5 text-[#f0b90b] font-semibold text-sm">
             Read full story
-            <span className="transition-transform duration-300 group-hover:translate-x-1">→</span>
+            <span className="transition-transform duration-300 group-hover:translate-x-1">-&gt;</span>
           </span>
         )}
       </div>
@@ -223,7 +223,7 @@ function NewsCard({ article, index }) {
               className="inline-flex items-center gap-1 mt-4 text-sm font-semibold text-[#f0b90b]"
             >
               Open coverage
-              <span className="transition-transform duration-300 group-hover:translate-x-1">→</span>
+              <span className="transition-transform duration-300 group-hover:translate-x-1">-&gt;</span>
             </a>
           )}
         </div>
@@ -262,3 +262,4 @@ function formatTimeAgo(date) {
 }
 
 export default News
+

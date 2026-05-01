@@ -1,12 +1,20 @@
-const { getTopCoins } = require('../services/coingeckoService');
-const { getBatchPrices, getKlines } = require('../services/binanceService');
+const { getBatchPrices, getKlines, getTopUsdtSymbols, get24hTicker } = require('../services/binanceService');
 const NodeCache = require('node-cache');
 const { getExecutionQualityForSymbols } = require('../services/executionQualityService');
+const { getCoinImageCandidatesMap } = require('../services/coinImageService');
 
 const marketQualityCache = new NodeCache({ stdTTL: 6, checkperiod: 3 });
 const marketChartCache = new NodeCache({ stdTTL: 15, checkperiod: 5 });
 let lastQualityResponse = null;
 const CHART_INTERVALS = new Set(['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1d']);
+const DEFAULT_MARKET_LIMIT = 90;
+const MAX_MARKET_LIMIT = 180;
+
+function parseMarketLimit(rawLimit) {
+  const parsed = Number(rawLimit);
+  if (!Number.isFinite(parsed)) return DEFAULT_MARKET_LIMIT;
+  return Math.max(30, Math.min(MAX_MARKET_LIMIT, Math.round(parsed)));
+}
 
 function parseSymbolsQuery(rawSymbols) {
   if (!rawSymbols) return [];
@@ -37,32 +45,105 @@ function parseChartSymbol(rawSymbol) {
   return symbol;
 }
 
+function generateFallbackSparkline(lastPrice, changePct = 0) {
+  if (!Number.isFinite(lastPrice) || lastPrice <= 0) return { price: [] };
+
+  const pct = Number.isFinite(changePct) ? changePct : 0;
+  const openPrice = lastPrice / (1 + (pct / 100 || 0));
+  const safeOpen = Number.isFinite(openPrice) && openPrice > 0 ? openPrice : lastPrice;
+
+  const points = Array.from({ length: 8 }, (_, index) => {
+    const t = index / 7;
+    const baseline = safeOpen + (lastPrice - safeOpen) * t;
+    const wave = Math.sin(t * Math.PI * 2) * (Math.abs(lastPrice - safeOpen) * 0.08);
+    return Number((baseline + wave).toFixed(8));
+  });
+
+  return { price: points };
+}
+
+function createBinanceMarketCoin(pairSymbol, ticker, rankIndex = 0, imageCandidates = []) {
+  const baseSymbol = String(pairSymbol || '').replace(/USDT$/, '').toUpperCase();
+  const lowerBase = baseSymbol.toLowerCase();
+  const currentPrice = Number(ticker?.lastPrice);
+  const pct24h = Number(ticker?.priceChangePercent);
+  const quoteVolume = Number(ticker?.quoteVolume);
+  const high24h = Number(ticker?.highPrice);
+  const low24h = Number(ticker?.lowPrice);
+
+  return {
+    id: `binance-${lowerBase}`,
+    name: baseSymbol,
+    symbol: lowerBase,
+    image: imageCandidates[0] || null,
+    image_candidates: imageCandidates,
+    current_price: Number.isFinite(currentPrice) ? currentPrice : null,
+    price_change_percentage_24h: Number.isFinite(pct24h) ? pct24h : null,
+    market_cap: null,
+    market_cap_rank: null,
+    total_volume: Number.isFinite(quoteVolume) ? quoteVolume : null,
+    high_24h: Number.isFinite(high24h) ? high24h : null,
+    low_24h: Number.isFinite(low24h) ? low24h : null,
+    ath: null,
+    atl: null,
+    circulating_supply: null,
+    total_supply: null,
+    max_supply: null,
+    sparkline_in_7d: generateFallbackSparkline(currentPrice, pct24h),
+    source: 'binance',
+    popularity_rank: rankIndex + 1,
+  };
+}
+
 const getMarketOverview = async (req, res) => {
   try {
-    const coins = await getTopCoins();
+    const limit = parseMarketLimit(req.query.limit);
+    const binancePoolLimit = Math.min(Math.max(limit * 2, 120), 300);
+    const minQuoteVolume = limit > 120 ? 1_500_000 : 1_000_000;
 
-    const usdtPairs = coins
-      .map((coin) => `${String(coin.symbol || '').toUpperCase()}USDT`)
-      .filter((pair) => /^[A-Z0-9]+USDT$/.test(pair));
-
-    let binancePrices = {};
-    try {
-      binancePrices = await getBatchPrices(usdtPairs);
-    } catch (error) {
-      console.log(`[Market] Binance price sync failed, using fallback prices: ${error.message}`);
-    }
-
-    const merged = coins.map((coin) => {
-      const pair = `${String(coin.symbol || '').toUpperCase()}USDT`;
-      const binancePrice = binancePrices[pair];
-
-      return {
-        ...coin,
-        current_price: typeof binancePrice === 'number' ? binancePrice : coin.current_price
-      };
+    const topBinanceSymbols = await getTopUsdtSymbols({
+      limit: binancePoolLimit,
+      minQuoteVolume,
+      excludeStableBases: true
     });
 
-    res.json(merged);
+    let ticker24hMap = {};
+    let priceMap = {};
+    let imageCandidatesMap = {};
+
+    try {
+      const baseSymbols = topBinanceSymbols.map((pair) => String(pair || '').replace(/USDT$/, '').toUpperCase());
+      const [tickers, prices, imageMap] = await Promise.all([
+        get24hTicker(topBinanceSymbols),
+        getBatchPrices(topBinanceSymbols),
+        getCoinImageCandidatesMap(baseSymbols),
+      ]);
+      ticker24hMap = (tickers && typeof tickers === 'object' && !Array.isArray(tickers)) ? tickers : {};
+      priceMap = (prices && typeof prices === 'object' && !Array.isArray(prices)) ? prices : {};
+      imageCandidatesMap = (imageMap && typeof imageMap === 'object' && !Array.isArray(imageMap)) ? imageMap : {};
+    } catch (error) {
+      console.log(`[Market] Binance market sync failed: ${error.message}`);
+    }
+
+    const coins = topBinanceSymbols
+      .map((pair, index) => {
+        const ticker = ticker24hMap[pair];
+        if (!ticker) return null;
+        const baseSymbol = String(pair || '').replace(/USDT$/, '').toUpperCase();
+        const imageCandidates = Array.isArray(imageCandidatesMap[baseSymbol]) ? imageCandidatesMap[baseSymbol] : [];
+        const coin = createBinanceMarketCoin(pair, ticker, index, imageCandidates);
+        const livePrice = Number(priceMap[pair]);
+        if (Number.isFinite(livePrice) && livePrice > 0) {
+          coin.current_price = livePrice;
+        }
+        return coin;
+      })
+      .filter(Boolean)
+      .filter((coin) => Number.isFinite(coin.current_price) && coin.current_price > 0)
+      .sort((a, b) => (Number(b.total_volume) || 0) - (Number(a.total_volume) || 0))
+      .slice(0, limit);
+
+    res.json(coins);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

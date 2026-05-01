@@ -46,20 +46,23 @@ const Stats = ({ loading }) => {
 
   return (
     <div>
-      <h2 className="text-2xl font-bold text-white mb-6">Performance Dashboard</h2>
+      <div className="mb-6 rounded-2xl border border-[#315077] bg-[linear-gradient(140deg,#0f1c33,#122745)] p-5">
+        <p className="cc-mono text-[11px] uppercase tracking-[0.18em] text-[#9bb5db]">Performance Layer</p>
+        <h2 className="text-2xl font-bold text-white mt-1">Execution Edge Dashboard</h2>
+      </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-        <div className="bg-[#111b2d] rounded-xl border border-[#2a3a55] p-4">
+        <div className="bg-[#111b2d] rounded-xl border border-[#304a70] p-4">
           <p className="text-sm text-[#8ea2c4] mb-1">Total Signals</p>
           <p className="text-2xl font-bold text-white">{stats.totalSignals}</p>
         </div>
 
-        <div className="bg-[#111b2d] rounded-xl border border-[#2a3a55] p-4">
+        <div className="bg-[#111b2d] rounded-xl border border-[#304a70] p-4">
           <p className="text-sm text-[#8ea2c4] mb-1">Wins</p>
           <p className="text-2xl font-bold text-[#64f2b3]">{stats.wins}</p>
         </div>
 
-        <div className="bg-[#111b2d] rounded-xl border border-[#2a3a55] p-4">
+        <div className="bg-[#111b2d] rounded-xl border border-[#304a70] p-4">
           <p className="text-sm text-[#8ea2c4] mb-1">Losses</p>
           <p className="text-2xl font-bold text-[#ff8fa1]">{stats.losses}</p>
         </div>
