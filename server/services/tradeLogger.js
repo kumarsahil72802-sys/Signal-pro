@@ -20,16 +20,4 @@ async function logTrade(signal, result, exitPrice) {
   }
 }
 
-async function cleanOldLogs() {
-  try {
-    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    const result = await TradeLog.deleteMany({ createdAt: { $lt: cutoff } });
-    console.log(`[CLEANUP] Deleted ${result.deletedCount} old trade logs`);
-    return result.deletedCount;
-  } catch (error) {
-    console.error(`[CLEANUP] Failed to clean logs: ${error.message}`);
-    return 0;
-  }
-}
-
-module.exports = { logTrade, cleanOldLogs };
+module.exports = { logTrade };

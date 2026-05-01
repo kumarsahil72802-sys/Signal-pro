@@ -187,5 +187,5 @@ function getMonitorStatus() {
   return "running";
 }
 
-module.exports = { startSignalMonitor, monitorSignals, getMonitorStatus };
+module.exports = { startSignalMonitor, getMonitorStatus };
 

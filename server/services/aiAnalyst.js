@@ -80,4 +80,4 @@ async function enhancedAnalyze(signal) {
   return analyzed;
 }
 
-module.exports = { analyzeSignal, enhancedAnalyze };
+module.exports = { enhancedAnalyze };

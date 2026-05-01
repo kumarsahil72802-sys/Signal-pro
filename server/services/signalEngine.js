@@ -2544,28 +2544,6 @@ function getEngineStatus() {
 
 module.exports = {
   startSignalEngine,
-  runEngine,
-  runAutoLearning,
-  loadThresholdFromDB,
   getEngineStatus,
-  // Technical analysis functions (for testing)
-  detectMarketRegime,    // M2C2 Phase 1: Regime detection
-  detectTrend,
-  detectAdvancedSignal,  // NEW v2: Advanced signal detection with proximity + slope
-  detectVolatilityBreakout, // NEW v3: Bollinger Band squeeze breakout detection
-  calculateEMASlope,     // NEW v2: EMA slope calculation
-  calculateRSI,
-  checkVolume,
-  calculateVolumeDelta,  // NEW: Volume Delta analysis (buying vs selling pressure)
-  calculateSMA,
-  calculateEMA,
-  calculateMACD,
-  calculateMomentum,
-  calculateATR,
-  calculateBollingerBands,
-  calcTechnicalScore,
-  calcMarketScore,
-  detect4HTrend,
-  getBTCTrend,
   getDynamicThreshold: getConfidenceThreshold
 };

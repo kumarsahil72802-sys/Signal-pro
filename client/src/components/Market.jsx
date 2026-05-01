@@ -29,14 +29,16 @@ const MARKET_PRESETS = {
     sort: 'marketcap',
   },
 }
-const SOURCE_OPTIONS = [
-  { value: 'all', label: 'All Binance Markets' },
-  { value: 'binance', label: 'Binance Live' },
-]
 const QUOTE_SUFFIXES = ['FDUSD', 'USDT', 'USDC', 'BUSD', 'TUSD', 'USDP', 'DAI', 'USDE']
 const STABLE_SYMBOLS = new Set(['USDT', 'USDC', 'BUSD', 'FDUSD', 'TUSD', 'USDP', 'DAI', 'USDE', 'USD1', 'PYUSD'])
 
 const normalizeTickerSymbol = (value) => String(value || '').trim().toUpperCase()
+const formatSourceLabel = (source) => {
+  const normalized = String(source || '').trim().toLowerCase()
+  if (!normalized) return 'Unknown Source'
+  if (normalized === 'binance') return 'Binance Live'
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1)
+}
 
 const buildChartSymbolCandidates = (rawSymbol) => {
   const symbol = normalizeTickerSymbol(rawSymbol)
@@ -314,6 +316,92 @@ const StatCard = ({ label, value }) => (
   </div>
 )
 
+const toFiniteNumber = (value) => {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? numeric : null
+}
+
+const clampPercent = (value) => {
+  if (!Number.isFinite(value)) return 0
+  return Math.max(0, Math.min(100, value))
+}
+
+const formatSignedPercent = (value, digits = 2) => {
+  if (!Number.isFinite(value)) return 'N/A'
+  const sign = value > 0 ? '+' : ''
+  return `${sign}${value.toFixed(digits)}%`
+}
+
+const getVolatilityTone = (volatilityPct) => {
+  if (!Number.isFinite(volatilityPct)) return 'Unknown'
+  if (volatilityPct >= 12) return 'Explosive'
+  if (volatilityPct >= 7) return 'Elevated'
+  if (volatilityPct >= 3) return 'Active'
+  return 'Compressed'
+}
+
+const buildCoinNarrative = ({ isPositive, distanceToAthPct, volumeToCapPct, newsBias }) => {
+  const move = isPositive ? 'buyers controlling intraday flow' : 'sellers currently dictating momentum'
+  const ath = Number.isFinite(distanceToAthPct)
+    ? (distanceToAthPct <= -45 ? 'still far from cycle highs' : 'holding relatively close to peak structure')
+    : 'long-cycle distance to ATH is unclear'
+  const liquidity = Number.isFinite(volumeToCapPct)
+    ? (volumeToCapPct >= 18 ? 'turnover is high for its size' : 'turnover is moderate, watch conviction candles')
+    : 'turnover data is limited'
+  const headline = newsBias === 'Bullish'
+    ? 'headlines are skewed optimistic'
+    : newsBias === 'Bearish'
+      ? 'headline tone is risk-aware'
+      : 'headline tone is mixed'
+
+  return `${move}; ${ath}; ${liquidity}; ${headline}.`
+}
+
+const scoreNewsBias = (articles = []) => {
+  if (!Array.isArray(articles) || articles.length === 0) return { label: 'Neutral', score: 50 }
+  const positiveWords = ['surge', 'rally', 'breakout', 'adoption', 'approval', 'record', 'bull', 'growth', 'gain']
+  const negativeWords = ['hack', 'drop', 'lawsuit', 'selloff', 'ban', 'bear', 'decline', 'risk', 'outflow']
+
+  let score = 0
+  articles.forEach((article) => {
+    const title = String(article?.title || '').toLowerCase()
+    positiveWords.forEach((word) => {
+      if (title.includes(word)) score += 1
+    })
+    negativeWords.forEach((word) => {
+      if (title.includes(word)) score -= 1
+    })
+  })
+
+  if (score >= 3) return { label: 'Bullish', score: 76 }
+  if (score <= -3) return { label: 'Bearish', score: 24 }
+  return { label: 'Neutral', score: 50 }
+}
+
+const InsightMeter = ({ label, value, score = 0, tone = 'cyan', hint }) => {
+  const tones = {
+    cyan: 'from-[#53d8ff] to-[#2d8be9]',
+    green: 'from-[#6af2ba] to-[#2eb872]',
+    amber: 'from-[#ffd477] to-[#ff9f3e]',
+    rose: 'from-[#ff9db0] to-[#f45d76]',
+  }
+
+  const toneClass = tones[tone] || tones.cyan
+
+  return (
+    <div className="rounded-xl border border-[#2b4369] bg-[#0e1b33] p-3">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-[11px] uppercase tracking-[0.16em] text-[#8faad2]">{label}</p>
+        <p className="text-sm font-semibold text-white">{value}</p>
+      </div>
+      <div className="mt-2 h-2 rounded-full bg-[#1a2e4f] overflow-hidden">
+        <div className={`h-full rounded-full bg-gradient-to-r ${toneClass}`} style={{ width: `${clampPercent(score)}%` }} />
+      </div>
+      {hint && <p className="mt-2 text-[11px] text-[#91a9ce]">{hint}</p>}
+    </div>
+  )
+}
+
 const MarketCard = memo(function MarketCard({ coin, quality, qualityApiFailed, onSelect }) {
   const isPositive = coin.price_change_percentage_24h >= 0
   const changeColor = isPositive ? 'text-[#64f2b3]' : 'text-[#ff8fa1]'
@@ -529,6 +617,48 @@ function CoinDetailOverlay({ coin, quality, qualityApiFailed, onClose }) {
   const displayPair = chartSymbolUsed
     ? formatPairLabel(chartSymbolUsed)
     : `${normalizeTickerSymbol(coin.symbol)} / USDT`
+  const currentPrice = toFiniteNumber(coin.current_price)
+  const low24 = toFiniteNumber(coin.low_24h)
+  const high24 = toFiniteNumber(coin.high_24h)
+  const ath = toFiniteNumber(coin.ath)
+  const marketCap = toFiniteNumber(coin.market_cap)
+  const volume24 = toFiniteNumber(coin.total_volume)
+  const circulating = toFiniteNumber(coin.circulating_supply)
+  const maxSupply = toFiniteNumber(coin.max_supply)
+  const totalSupply = toFiniteNumber(coin.total_supply)
+  const spreadPct = toFiniteNumber(quality?.spreadPct)
+  const buyPressurePct = toFiniteNumber(quality?.imbalanceBuyPct)
+  const sellPressurePct = toFiniteNumber(quality?.imbalanceSellPct)
+  const rangeWidthPct = (Number.isFinite(low24) && Number.isFinite(high24) && Number.isFinite(currentPrice) && currentPrice > 0)
+    ? ((high24 - low24) / currentPrice) * 100
+    : null
+  const rangePositionPct = (Number.isFinite(low24) && Number.isFinite(high24) && Number.isFinite(currentPrice) && high24 > low24)
+    ? ((currentPrice - low24) / (high24 - low24)) * 100
+    : null
+  const volumeToCapPct = (Number.isFinite(volume24) && Number.isFinite(marketCap) && marketCap > 0)
+    ? (volume24 / marketCap) * 100
+    : null
+  const distanceToAthPct = (Number.isFinite(currentPrice) && Number.isFinite(ath) && ath > 0)
+    ? ((currentPrice - ath) / ath) * 100
+    : null
+  const issuancePct = (Number.isFinite(circulating) && Number.isFinite(maxSupply) && maxSupply > 0)
+    ? (circulating / maxSupply) * 100
+    : (Number.isFinite(circulating) && Number.isFinite(totalSupply) && totalSupply > 0)
+      ? (circulating / totalSupply) * 100
+      : null
+  const newsBiasMeta = scoreNewsBias(coinNews)
+  const newsBias = newsBiasMeta.label
+  const researchNarrative = buildCoinNarrative({
+    isPositive,
+    distanceToAthPct,
+    volumeToCapPct,
+    newsBias,
+  })
+  const volatilityTone = getVolatilityTone(rangeWidthPct)
+  const buyDominanceScore = Number.isFinite(buyPressurePct) ? buyPressurePct : 50
+  const spreadScore = Number.isFinite(spreadPct)
+    ? clampPercent(100 - Math.min(spreadPct * 300, 100))
+    : 0
 
   return (
     <div className="fixed inset-0 z-50">
@@ -541,134 +671,201 @@ function CoinDetailOverlay({ coin, quality, qualityApiFailed, onClose }) {
 
       <div className="relative z-10 h-full overflow-y-auto">
         <div className="min-h-full px-3 py-4 sm:px-6 sm:py-6 lg:px-10">
-          <section className="mx-auto max-w-6xl rounded-3xl border border-[#2d4062] bg-[linear-gradient(160deg,#091327_0%,#0d1931_45%,#0a1428_100%)] shadow-[0_35px_70px_rgba(2,7,16,0.66)]">
-            <div className="border-b border-[#253a5b] p-4 sm:p-6">
-              <div className="flex items-start justify-between gap-4">
-                <div className="flex items-center gap-3 min-w-0">
-                  <CoinIcon symbol={coin.symbol} name={coin.name} image={coin.image} imageCandidates={coin.image_candidates} />
-                  <div className="min-w-0">
-                    <p className="text-2xl sm:text-3xl font-extrabold text-white">{coin.name}</p>
-                    <p className="text-sm text-[#9ab0d3]">{displayPair}</p>
+          <section className="mx-auto max-w-7xl overflow-hidden rounded-3xl border border-[#2a4167] bg-[linear-gradient(150deg,#081326_0%,#0d1f3f_45%,#091733_100%)] shadow-[0_40px_80px_rgba(2,6,17,0.72)]">
+            <div className="relative border-b border-[#274168] px-4 py-5 sm:px-6 sm:py-6">
+              <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_85%_10%,rgba(83,216,255,0.16),transparent_40%),radial-gradient(circle_at_10%_80%,rgba(255,190,46,0.12),transparent_35%)]" />
+              <div className="relative flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-3">
+                    <CoinIcon symbol={coin.symbol} name={coin.name} image={coin.image} imageCandidates={coin.image_candidates} />
+                    <div className="min-w-0">
+                      <p className="cc-mono text-[11px] uppercase tracking-[0.2em] text-[#8eacd6]">Asset Intelligence Room</p>
+                      <h2 className="mt-1 text-2xl sm:text-3xl font-black text-white truncate">{coin.name}</h2>
+                      <p className="text-sm text-[#9bb3d8]">{displayPair}</p>
+                    </div>
+                  </div>
+                  <div className="mt-4 flex flex-wrap items-center gap-2">
+                    <span className="rounded-full border border-[#395781] bg-[#12223f] px-3 py-1 text-[11px] text-[#c7d8f4] cc-mono">
+                      Rank #{coin.market_cap_rank || 'N/A'}
+                    </span>
+                    <span className={`rounded-full border px-3 py-1 text-[11px] cc-mono ${isPositive ? 'border-[#2e6f55] bg-[#123324] text-[#88f3c8]' : 'border-[#6d3243] bg-[#391f2a] text-[#ffb0c0]'}`}>
+                      24h {coin.price_change_percentage_24h != null ? formatSignedPercent(coin.price_change_percentage_24h) : 'N/A'}
+                    </span>
+                    {chartChangePct != null && (
+                      <span className={`rounded-full border px-3 py-1 text-[11px] cc-mono ${chartChangePct >= 0 ? 'border-[#2f6e58] bg-[#133428] text-[#89f2c9]' : 'border-[#713345] bg-[#3a202c] text-[#ffb3c3]'}`}>
+                        Interval {formatSignedPercent(chartChangePct)}
+                      </span>
+                    )}
+                    <span className={`rounded-full border px-3 py-1 text-[11px] cc-mono ${getExecutionBadgeClass(executionQuality)}`}>
+                      Execution {executionQuality}
+                    </span>
+                    <span className="rounded-full border border-[#3f5f8f] bg-[#152846] px-3 py-1 text-[11px] text-[#c9daf7] cc-mono">
+                      Volatility {volatilityTone}
+                    </span>
                   </div>
                 </div>
 
                 <button
                   type="button"
                   onClick={onClose}
-                  className="rounded-lg border border-[#324c75] bg-[#14243d] px-3 py-2 text-sm font-semibold text-[#bdd0ef] hover:border-[#4a6694]"
+                  className="rounded-lg border border-[#35527f] bg-[#13243f] px-3 py-2 text-sm font-semibold text-[#c6d8f6] hover:border-[#5578ad]"
                 >
                   Close
                 </button>
               </div>
-
-              <div className="mt-4 flex flex-wrap items-end gap-3">
-                <p className="text-3xl sm:text-4xl font-black text-white">{formatPrice(coin.current_price, 6)}</p>
-                <span className={`px-2.5 py-1 rounded-md text-xs font-semibold ${isPositive ? 'bg-[#153225] text-[#64f2b3]' : 'bg-[#391a25] text-[#ff8fa1]'}`}>
-                  24h {coin.price_change_percentage_24h != null ? `${coin.price_change_percentage_24h.toFixed(2)}%` : 'N/A'}
-                </span>
-                {chartChangePct != null && (
-                  <span className={`px-2.5 py-1 rounded-md text-xs font-semibold ${chartChangePct >= 0 ? 'bg-[#153225] text-[#64f2b3]' : 'bg-[#391a25] text-[#ff8fa1]'}`}>
-                    Interval {chartChangePct.toFixed(2)}%
-                  </span>
-                )}
-                <span className={`px-2 py-1 rounded text-[11px] font-semibold border ${getExecutionBadgeClass(executionQuality)}`}>
-                  Execution {executionQuality}
-                </span>
-              </div>
             </div>
 
-            <div className="grid grid-cols-1 xl:grid-cols-3 gap-5 p-4 sm:p-6">
-              <div className="xl:col-span-2 space-y-4">
-                <div className="flex items-center justify-between flex-wrap gap-2">
-                  <h3 className="text-lg font-bold text-white">Price Chart</h3>
-                  <div className="inline-flex p-1 rounded-lg bg-[#111d32] border border-[#2d4265]">
-                    {CHART_INTERVALS.map((interval) => (
-                      <button
-                        key={interval}
-                        type="button"
-                        onClick={() => setChartInterval(interval)}
-                        className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${chartInterval === interval
-                          ? 'bg-[#f0b90b] text-[#1d1400]'
-                          : 'text-[#a9bfdf] hover:text-white'
-                        }`}
-                      >
-                        {interval}
-                      </button>
-                    ))}
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 p-4 sm:p-6">
+              <div className="xl:col-span-8 space-y-4">
+                <div className="rounded-2xl border border-[#2c446d] bg-[linear-gradient(145deg,#0d1a31,#0f2341)] p-4 sm:p-5">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="text-lg font-bold text-white">Market Structure</p>
+                      <p className="text-xs text-[#95acd2] mt-1">Range behavior, intraday trend and execution map</p>
+                    </div>
+                    <div className="inline-flex p-1 rounded-lg bg-[#111f39] border border-[#2d456f]">
+                      {CHART_INTERVALS.map((interval) => (
+                        <button
+                          key={interval}
+                          type="button"
+                          onClick={() => setChartInterval(interval)}
+                          className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${chartInterval === interval
+                            ? 'bg-[#f0b90b] text-[#1d1400]'
+                            : 'text-[#a9bfdf] hover:text-white'
+                          }`}
+                        >
+                          {interval}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
-                {chartLoading ? (
-                  <div className="h-56 rounded-2xl border border-[#273958] bg-[#0d172a] flex items-center justify-center">
-                    <div className="animate-spin rounded-full h-9 w-9 border-b-2 border-[#f0b90b]" />
-                  </div>
-                ) : (
-                  <DetailChart points={chartPoints} />
-                )}
 
-                {chartError && (
-                  <p className="text-sm text-[#ff9db0]">{chartError}</p>
-                )}
-                {!chartError && chartUpdatedAt && (
-                  <p className="text-xs text-[#8199bf]">
-                    Source Binance | Updated {new Date(chartUpdatedAt).toLocaleTimeString()}
-                  </p>
-                )}
+                  <div className="mt-4">
+                    {chartLoading ? (
+                      <div className="h-56 rounded-2xl border border-[#2b4268] bg-[#0b172e] flex items-center justify-center">
+                        <div className="animate-spin rounded-full h-9 w-9 border-b-2 border-[#f0b90b]" />
+                      </div>
+                    ) : (
+                      <DetailChart points={chartPoints} />
+                    )}
+                  </div>
+
+                  {chartError && (
+                    <p className="mt-3 text-sm text-[#ff9db0]">{chartError}</p>
+                  )}
+                  {!chartError && chartUpdatedAt && (
+                    <p className="mt-3 text-xs text-[#8da6ce]">
+                      Source Binance | Updated {new Date(chartUpdatedAt).toLocaleTimeString()}
+                    </p>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                  <InsightMeter
+                    label="Range Occupancy"
+                    value={Number.isFinite(rangePositionPct) ? `${clampPercent(rangePositionPct).toFixed(1)}%` : 'N/A'}
+                    score={Number.isFinite(rangePositionPct) ? rangePositionPct : 0}
+                    tone="cyan"
+                    hint="How close current price is to the 24h high."
+                  />
+                  <InsightMeter
+                    label="Volume Intensity"
+                    value={Number.isFinite(volumeToCapPct) ? `${volumeToCapPct.toFixed(2)}%` : 'N/A'}
+                    score={Number.isFinite(volumeToCapPct) ? Math.min(volumeToCapPct * 3.5, 100) : 0}
+                    tone="amber"
+                    hint="24h volume compared with market cap."
+                  />
+                  <InsightMeter
+                    label="Buy Pressure"
+                    value={Number.isFinite(buyPressurePct) && Number.isFinite(sellPressurePct) ? `${buyPressurePct.toFixed(1)} / ${sellPressurePct.toFixed(1)}` : 'N/A'}
+                    score={buyDominanceScore}
+                    tone="green"
+                    hint="Orderbook imbalance from live execution feed."
+                  />
+                  <InsightMeter
+                    label="Spread Efficiency"
+                    value={formatSpread(spreadPct)}
+                    score={spreadScore}
+                    tone="rose"
+                    hint="Higher score means tighter spread quality."
+                  />
+                </div>
 
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                   <StatCard label="Market Cap" value={formatCompactUsd(coin.market_cap)} />
                   <StatCard label="24h Volume" value={formatCompactUsd(coin.total_volume)} />
                   <StatCard label="24h High" value={formatPrice(coin.high_24h)} />
                   <StatCard label="24h Low" value={formatPrice(coin.low_24h)} />
-                  <StatCard label="ATH" value={formatPrice(coin.ath)} />
-                  <StatCard label="ATL" value={formatPrice(coin.atl)} />
+                  <StatCard label="Distance To ATH" value={formatSignedPercent(distanceToAthPct)} />
+                  <StatCard label="24h Range Width" value={formatSignedPercent(rangeWidthPct)} />
                   <StatCard label="Circulating" value={formatSupply(coin.circulating_supply)} />
-                  <StatCard label="Max Supply" value={formatSupply(coin.max_supply)} />
+                  <StatCard label="Supply Issued" value={Number.isFinite(issuancePct) ? `${issuancePct.toFixed(1)}%` : 'N/A'} />
                 </div>
               </div>
 
-              <aside className="rounded-2xl border border-[#2a3e60] bg-[#0f1b31] p-4 sm:p-5">
-                <h3 className="text-lg font-bold text-white">Latest {coin.symbol?.toUpperCase()} News</h3>
-                <p className="text-xs text-[#90a5ca] mt-1">Auto-curated coin headlines</p>
-
-                {newsLoading ? (
-                  <div className="mt-4 space-y-3">
-                    {[...Array(4)].map((_, idx) => (
-                      <div key={idx} className="rounded-lg border border-[#253957] bg-[#111f37] p-3">
-                        <div className="h-3 w-24 rounded bg-[#243a59] animate-pulse" />
-                        <div className="mt-2 h-4 w-full rounded bg-[#213452] animate-pulse" />
-                        <div className="mt-1 h-4 w-4/5 rounded bg-[#213452] animate-pulse" />
-                      </div>
-                    ))}
+              <aside className="xl:col-span-4 space-y-4">
+                <div className="rounded-2xl border border-[#304870] bg-[linear-gradient(145deg,#101f39,#0f1b33)] p-4 sm:p-5">
+                  <p className="cc-mono text-[11px] uppercase tracking-[0.18em] text-[#91aed8]">Deep Dive Thesis</p>
+                  <p className="mt-2 text-sm leading-relaxed text-[#d7e3f8]">{researchNarrative}</p>
+                  <div className="mt-4 space-y-2 text-xs text-[#9fb6da]">
+                    <p>Price now: <span className="font-semibold text-white">{formatPrice(coin.current_price, 6)}</span></p>
+                    <p>Distance to ATH: <span className="font-semibold text-white">{formatSignedPercent(distanceToAthPct)}</span></p>
+                    <p>Liquidity turnover: <span className="font-semibold text-white">{Number.isFinite(volumeToCapPct) ? `${volumeToCapPct.toFixed(2)}%` : 'N/A'}</span></p>
+                    <p>News bias signal: <span className="font-semibold text-white">{newsBias}</span></p>
+                    <p>Slippage risk: <span className="font-semibold text-white">{(!qualityApiFailed && quality?.slippageRisk) || 'N/A'}</span></p>
                   </div>
-                ) : (
-                  <div className="mt-4 space-y-3 max-h-[420px] overflow-auto pr-1">
-                    {coinNews.length === 0 && !newsError && (
-                      <p className="text-sm text-[#8ea2c4]">No fresh headlines found for this coin yet.</p>
-                    )}
-                    {newsError && (
-                      <p className="text-sm text-[#ff9db0]">{newsError}</p>
-                    )}
-                    {coinNews.map((article) => (
-                      <a
-                        key={article.id || article.guid || article.url || article.title}
-                        href={article.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="block rounded-lg border border-[#263c5d] bg-[#111f37] p-3 hover:border-[#3a5780]"
-                      >
-                        <p className="text-[11px] text-[#86a2cc]">{article.source || 'Unknown'}  {formatTimeAgo(article.published_on)}</p>
-                        <p className="mt-1 text-sm font-semibold text-[#e4edfb] leading-snug line-clamp-2">{article.title || 'Untitled headline'}</p>
-                      </a>
-                    ))}
-                  </div>
-                )}
+                </div>
 
-                <div className="mt-5 rounded-lg border border-[#2b4266] bg-[#111f35] p-3 text-xs text-[#9ab0d3] space-y-1">
-                  <p>Spread: <span className="font-semibold text-white">{formatSpread(quality?.spreadPct)}</span></p>
+                <div className="rounded-2xl border border-[#304870] bg-[#0f1b33] p-4 sm:p-5">
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className="text-lg font-bold text-white">Narrative Feed</h3>
+                    <span className="cc-mono rounded-full border border-[#3c5b87] bg-[#12233f] px-2.5 py-1 text-[10px] text-[#9cb5dc]">
+                      {coinNews.length} stories
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs text-[#90a5ca]">Latest {coin.symbol?.toUpperCase()} context to validate trend strength</p>
+
+                  {newsLoading ? (
+                    <div className="mt-4 space-y-3">
+                      {[...Array(4)].map((_, idx) => (
+                        <div key={idx} className="rounded-lg border border-[#253957] bg-[#111f37] p-3">
+                          <div className="h-3 w-24 rounded bg-[#243a59] animate-pulse" />
+                          <div className="mt-2 h-4 w-full rounded bg-[#213452] animate-pulse" />
+                          <div className="mt-1 h-4 w-4/5 rounded bg-[#213452] animate-pulse" />
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="mt-4 space-y-3 max-h-[360px] overflow-auto pr-1">
+                      {coinNews.length === 0 && !newsError && (
+                        <p className="text-sm text-[#8ea2c4]">No fresh headlines found for this coin yet.</p>
+                      )}
+                      {newsError && (
+                        <p className="text-sm text-[#ff9db0]">{newsError}</p>
+                      )}
+                      {coinNews.map((article) => (
+                        <a
+                          key={article.id || article.guid || article.url || article.title}
+                          href={article.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="block rounded-lg border border-[#263c5d] bg-[#111f37] p-3 hover:border-[#3a5780]"
+                        >
+                          <p className="text-[11px] text-[#86a2cc]">{article.source || 'Unknown'}  {formatTimeAgo(article.published_on)}</p>
+                          <p className="mt-1 text-sm font-semibold text-[#e4edfb] leading-snug line-clamp-2">{article.title || 'Untitled headline'}</p>
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-[#304870] bg-[#101f37] p-4 text-xs text-[#9ab0d3] space-y-2">
                   <p>Order Pressure: <span className="font-semibold text-white">{formatPressure(quality, qualityApiFailed)}</span></p>
-                  <p>Slippage Risk: <span className="font-semibold text-white">{(!qualityApiFailed && quality?.slippageRisk) || 'N/A'}</span></p>
-                  <p>Market Cap Rank: <span className="font-semibold text-white">{coin.market_cap_rank || 'N/A'}</span></p>
+                  <p>Spread: <span className="font-semibold text-white">{formatSpread(quality?.spreadPct)}</span></p>
+                  <p>News Bias Meter: <span className="font-semibold text-white">{newsBiasMeta.label} ({newsBiasMeta.score}/100)</span></p>
                   <p>Total Supply: <span className="font-semibold text-white">{formatSupply(coin.total_supply)}</span></p>
+                  <p>ATH: <span className="font-semibold text-white">{formatPrice(coin.ath)}</span></p>
+                  <p>ATL: <span className="font-semibold text-white">{formatPrice(coin.atl)}</span></p>
                 </div>
               </aside>
             </div>
@@ -687,6 +884,27 @@ const Market = ({ market, loading, qualityBySymbol = {}, qualityApiFailed = fals
   const [sourceFilter, setSourceFilter] = useState('all')
   const activePreset = MARKET_PRESETS[marketPreset] || MARKET_PRESETS.balanced
   const browseStateKey = `${marketPreset}|${sourceFilter}|${searchQuery.trim().toLowerCase()}`
+  const sourceOptions = useMemo(() => {
+    const sources = [...new Set(
+      market
+        .map((coin) => String(coin.source || '').trim().toLowerCase())
+        .filter(Boolean)
+    )]
+
+    if (sources.length === 0) {
+      return [{ value: 'all', label: 'All Markets' }]
+    }
+
+    if (sources.length === 1) {
+      return [{ value: 'all', label: formatSourceLabel(sources[0]) }]
+    }
+
+    return [
+      { value: 'all', label: 'All Sources' },
+      ...sources.map((source) => ({ value: source, label: formatSourceLabel(source) }))
+    ]
+  }, [market])
+  const effectiveSourceFilter = sourceOptions.some((option) => option.value === sourceFilter) ? sourceFilter : 'all'
 
   const marketPulse = useMemo(() => {
     const samples = market
@@ -718,13 +936,12 @@ const Market = ({ market, loading, qualityBySymbol = {}, qualityApiFailed = fals
       const matchesMove = activePreset.move === 'all'
         || (activePreset.move === 'gainers' && Number.isFinite(change) && change > 0)
         || (activePreset.move === 'losers' && Number.isFinite(change) && change < 0)
-      const matchesSource = sourceFilter === 'all'
-        || (sourceFilter === 'binance' && source === 'binance')
+      const matchesSource = effectiveSourceFilter === 'all' || effectiveSourceFilter === source
 
       const supportedSymbol = symbolUpper && !STABLE_SYMBOLS.has(symbolUpper)
       return supportedSymbol && matchesQuery && matchesMove && matchesSource
     })
-  }, [activePreset.move, market, searchQuery, sourceFilter])
+  }, [activePreset.move, effectiveSourceFilter, market, searchQuery])
 
   const sortedMarket = useMemo(() => {
     const list = filteredMarket.slice()
@@ -815,7 +1032,7 @@ const Market = ({ market, loading, qualityBySymbol = {}, qualityApiFailed = fals
               Tracked: {market.length}
             </span>
             <span className="cc-mono rounded-full border border-[#365071] bg-[#142742] px-3 py-1 text-[11px] text-[#9ab5dc]">
-              Source: {SOURCE_OPTIONS.find((option) => option.value === sourceFilter)?.label || 'All Markets'}
+              Source: {sourceOptions.find((option) => option.value === effectiveSourceFilter)?.label || 'All Markets'}
             </span>
           </div>
         </div>
@@ -845,11 +1062,11 @@ const Market = ({ market, loading, qualityBySymbol = {}, qualityApiFailed = fals
               Data Source
             </label>
             <select
-              value={sourceFilter}
+              value={effectiveSourceFilter}
               onChange={(event) => setSourceFilter(event.target.value)}
               className="w-full rounded-xl border border-[#40608f] bg-[#0b162a] px-3 py-3 text-sm text-[#dce8fb] outline-none focus:border-[#ffbe2e]"
             >
-              {SOURCE_OPTIONS.map((option) => (
+              {sourceOptions.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>

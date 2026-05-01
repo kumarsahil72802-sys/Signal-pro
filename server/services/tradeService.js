@@ -28,45 +28,6 @@ async function saveTradeSnapshot(data) {
   }
 }
 
-/**
- * Update the result of an existing trade
- * @param {String} tradeId - MongoDB document ID
- * @param {String} result - WIN, LOSS, or EXPIRED
- */
-async function updateTradeResult(tradeId, result) {
-  try {
-    const resultMap = {
-      'WIN': 1,
-      'LOSS': -1,
-      'EXPIRED': 0
-    };
-
-    const numericResult = resultMap[result];
-    
-    if (numericResult === undefined) {
-      throw new Error(`Invalid result type: ${result}`);
-    }
-
-    const updatedTrade = await Trade.findByIdAndUpdate(
-      tradeId,
-      { res: numericResult },
-      { new: true }
-    );
-
-    if (!updatedTrade) {
-      console.warn(`[TradeLogger] Trade not found for ID: ${tradeId}`);
-      return null;
-    }
-
-    console.log(`[TradeLogger] Updated result for trade ${tradeId} to ${result} (${numericResult})`);
-    return updatedTrade;
-  } catch (error) {
-    console.error(`[TradeLogger] Error updating trade result: ${error.message}`);
-    return null;
-  }
-}
-
 module.exports = {
-  saveTradeSnapshot,
-  updateTradeResult
+  saveTradeSnapshot
 };
