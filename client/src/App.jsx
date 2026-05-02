@@ -2,10 +2,10 @@ import { useState, useEffect, useRef } from 'react'
 import { getSignals, takeSignal, missSignal, getMarketData, getMarketQuality, getNews } from './services/api'
 import { NavTabs, Market, News, Signals, Stats, Toast } from './components'
 
-const CORE_REFRESH_MS = 3000
-const NEWS_REFRESH_MS = 20000
+const CORE_REFRESH_MS = 12000
+const NEWS_REFRESH_MS = 30000
 const QUALITY_DEBOUNCE_MS = 250
-const QUALITY_MIN_GAP_MS = 3000
+const QUALITY_MIN_GAP_MS = 10000
 const MARKET_CACHE_KEY = 'signal.market.snapshot.v2'
 const MARKET_FETCH_LIMIT = 140
 const MAX_QUALITY_MARKET_SYMBOLS = 50

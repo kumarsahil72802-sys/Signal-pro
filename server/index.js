@@ -17,6 +17,10 @@ const app = express();
 const isProduction = process.env.NODE_ENV === "production";
 const rateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000);
 const rateLimitMax = Number(process.env.RATE_LIMIT_MAX || (isProduction ? 300 : 2000));
+const allowedOrigins = String(process.env.CORS_ORIGINS || "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
 
 // Rate limiting: configurable for polling-heavy dashboards
 const limiter = rateLimit({
@@ -29,7 +33,13 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-app.use(cors());
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.length === 0) return callback(null, true);
+    return callback(null, allowedOrigins.includes(origin));
+  }
+}));
 app.use(express.json());
 
 // Health check endpoint

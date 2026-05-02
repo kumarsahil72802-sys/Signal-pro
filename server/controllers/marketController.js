@@ -2,6 +2,7 @@ const { getBatchPrices, getKlines, getTopUsdtSymbols, get24hTicker } = require('
 const NodeCache = require('node-cache');
 const { getExecutionQualityForSymbols } = require('../services/executionQualityService');
 const { getCoinImageCandidatesMap } = require('../services/coinImageService');
+const { getTopCoins } = require('../services/coingeckoService');
 
 const marketQualityCache = new NodeCache({ stdTTL: 6, checkperiod: 3 });
 const marketChartCache = new NodeCache({ stdTTL: 15, checkperiod: 5 });
@@ -9,6 +10,7 @@ let lastQualityResponse = null;
 const CHART_INTERVALS = new Set(['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1d']);
 const DEFAULT_MARKET_LIMIT = 90;
 const MAX_MARKET_LIMIT = 180;
+const COINGECKO_ENRICH_LIMIT = 250;
 
 function parseMarketLimit(rawLimit) {
   const parsed = Number(rawLimit);
@@ -95,6 +97,82 @@ function createBinanceMarketCoin(pairSymbol, ticker, rankIndex = 0, imageCandida
   };
 }
 
+function toFiniteNumber(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function getRankScore(value) {
+  const rank = Number(value);
+  if (!Number.isFinite(rank) || rank <= 0) return Number.POSITIVE_INFINITY;
+  return rank;
+}
+
+function pickPreferredCoinGeckoCoin(current, candidate) {
+  if (!candidate) return current;
+  if (!current) return candidate;
+
+  const currentRank = getRankScore(current.market_cap_rank);
+  const candidateRank = getRankScore(candidate.market_cap_rank);
+  if (candidateRank !== currentRank) return candidateRank < currentRank ? candidate : current;
+
+  const currentCap = Number(current.market_cap) || 0;
+  const candidateCap = Number(candidate.market_cap) || 0;
+  if (candidateCap !== currentCap) return candidateCap > currentCap ? candidate : current;
+
+  return current;
+}
+
+function buildCoinGeckoSymbolMap(coins = []) {
+  if (!Array.isArray(coins)) return {};
+
+  return coins.reduce((acc, coin) => {
+    const symbol = String(coin?.symbol || '').trim().toUpperCase();
+    if (!symbol) return acc;
+    acc[symbol] = pickPreferredCoinGeckoCoin(acc[symbol], coin);
+    return acc;
+  }, {});
+}
+
+function mergeCoinWithFundamentals(coin, fundamentals) {
+  if (!coin || !fundamentals) return coin;
+
+  const existingSparkline = Array.isArray(coin.sparkline_in_7d?.price) ? coin.sparkline_in_7d.price : [];
+  const fallbackSparkline = Array.isArray(fundamentals.sparkline_in_7d?.price) ? fundamentals.sparkline_in_7d.price : [];
+  const mergedImageCandidates = [...new Set([
+    fundamentals.image,
+    ...(Array.isArray(coin.image_candidates) ? coin.image_candidates : []),
+  ].filter(Boolean))];
+
+  const merged = {
+    ...coin,
+    name: fundamentals.name || coin.name,
+    image: mergedImageCandidates[0] || coin.image || null,
+    image_candidates: mergedImageCandidates,
+    market_cap: toFiniteNumber(fundamentals.market_cap) ?? coin.market_cap,
+    market_cap_rank: toFiniteNumber(fundamentals.market_cap_rank) ?? coin.market_cap_rank,
+    ath: toFiniteNumber(fundamentals.ath) ?? coin.ath,
+    atl: toFiniteNumber(fundamentals.atl) ?? coin.atl,
+    circulating_supply: toFiniteNumber(fundamentals.circulating_supply) ?? coin.circulating_supply,
+    total_supply: toFiniteNumber(fundamentals.total_supply) ?? coin.total_supply,
+    max_supply: toFiniteNumber(fundamentals.max_supply) ?? coin.max_supply,
+    coingecko_id: fundamentals.id || null,
+  };
+
+  if (!Number.isFinite(Number(merged.high_24h))) {
+    merged.high_24h = toFiniteNumber(fundamentals.high_24h);
+  }
+  if (!Number.isFinite(Number(merged.low_24h))) {
+    merged.low_24h = toFiniteNumber(fundamentals.low_24h);
+  }
+
+  if (existingSparkline.length < 24 && fallbackSparkline.length >= 24) {
+    merged.sparkline_in_7d = { price: fallbackSparkline };
+  }
+
+  return merged;
+}
+
 const getMarketOverview = async (req, res) => {
   try {
     const limit = parseMarketLimit(req.query.limit);
@@ -110,6 +188,7 @@ const getMarketOverview = async (req, res) => {
     let ticker24hMap = {};
     let priceMap = {};
     let imageCandidatesMap = {};
+    let fundamentalsBySymbol = {};
 
     try {
       const baseSymbols = topBinanceSymbols.map((pair) => String(pair || '').replace(/USDT$/, '').toUpperCase());
@@ -125,6 +204,13 @@ const getMarketOverview = async (req, res) => {
       console.log(`[Market] Binance market sync failed: ${error.message}`);
     }
 
+    try {
+      const coingeckoCoins = await getTopCoins(COINGECKO_ENRICH_LIMIT);
+      fundamentalsBySymbol = buildCoinGeckoSymbolMap(coingeckoCoins);
+    } catch (error) {
+      console.log(`[Market] CoinGecko enrich failed: ${error.message}`);
+    }
+
     const coins = topBinanceSymbols
       .map((pair, index) => {
         const ticker = ticker24hMap[pair];
@@ -136,7 +222,8 @@ const getMarketOverview = async (req, res) => {
         if (Number.isFinite(livePrice) && livePrice > 0) {
           coin.current_price = livePrice;
         }
-        return coin;
+        const fundamentals = fundamentalsBySymbol[baseSymbol];
+        return mergeCoinWithFundamentals(coin, fundamentals);
       })
       .filter(Boolean)
       .filter((coin) => Number.isFinite(coin.current_price) && coin.current_price > 0)

@@ -191,18 +191,15 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, onMis
   }, [signal.expireAt])
 
   useEffect(() => {
-    setChartInterval('15m')
-    setChartDataByInterval({})
-    setChartError('')
-  }, [signal?.coin])
-
-  useEffect(() => {
-    if (!isExpanded || !signal?.coin || chartLoading) return
+    if (!isExpanded || !signal?.coin) return
     if (chartDataByInterval[chartInterval]) return
 
     let active = true
-    setChartLoading(true)
-    setChartError('')
+    const bootTimer = setTimeout(() => {
+      if (!active) return
+      setChartLoading(true)
+      setChartError('')
+    }, 0)
 
     getMarketChart(signal.coin, chartInterval, CHART_LIMIT_BY_INTERVAL[chartInterval] || 96)
       .then((res) => {
@@ -224,8 +221,14 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, onMis
 
     return () => {
       active = false
+      clearTimeout(bootTimer)
     }
-  }, [isExpanded, signal?.coin, chartInterval, chartDataByInterval, chartLoading])
+  }, [isExpanded, signal?.coin, chartInterval, chartDataByInterval])
+
+  const handleChartIntervalChange = (nextInterval) => {
+    setChartError('')
+    setChartInterval(nextInterval)
+  }
 
   const getConfLabel = (c) => {
     if (c >= 80) return 'STRONG'
@@ -381,7 +384,7 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, onMis
               interval={chartInterval}
               loading={chartLoading}
               error={chartError}
-              onIntervalChange={setChartInterval}
+              onIntervalChange={handleChartIntervalChange}
             />
           </div>
 
@@ -498,6 +501,7 @@ const Signals = ({ signals, loading, actionLoading, onTake, onMiss, qualityBySym
 
         <div className="max-w-3xl mx-auto">
           <SignalCard
+            key={signal._id}
             signal={signal}
             isExpanded={true}
             onToggle={() => {}}

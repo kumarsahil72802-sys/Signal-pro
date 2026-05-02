@@ -32,7 +32,7 @@ const Stats = ({ loading }) => {
     )
   }
 
-  if (!stats || stats.totalSignals === 0) {
+  if (!stats || stats.totalTaken === 0) {
     return (
       <div className="text-center py-12">
         <div className="w-16 h-16 rounded-full border border-[#2a3a55] bg-[#111b2d] text-[#f0b90b] font-bold mx-auto mb-4 flex items-center justify-center">
@@ -51,10 +51,15 @@ const Stats = ({ loading }) => {
         <h2 className="text-2xl font-bold text-white mt-1">Execution Edge Dashboard</h2>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
         <div className="bg-[#111b2d] rounded-xl border border-[#304a70] p-4">
-          <p className="text-sm text-[#8ea2c4] mb-1">Total Signals</p>
-          <p className="text-2xl font-bold text-white">{stats.totalSignals}</p>
+          <p className="text-sm text-[#8ea2c4] mb-1">Total Generated</p>
+          <p className="text-2xl font-bold text-white">{stats.totalGenerated}</p>
+        </div>
+
+        <div className="bg-[#111b2d] rounded-xl border border-[#304a70] p-4">
+          <p className="text-sm text-[#8ea2c4] mb-1">Total Taken</p>
+          <p className="text-2xl font-bold text-white">{stats.totalTaken}</p>
         </div>
 
         <div className="bg-[#111b2d] rounded-xl border border-[#304a70] p-4">

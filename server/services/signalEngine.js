@@ -1,30 +1,11 @@
 const { getKlines, getLivePrice, getTopUsdtSymbols } = require('./binanceService');
 const { getTopCoins } = require('./coingeckoService');
 const { getExecutionQualityForSymbols } = require('./executionQualityService');
+const { getNews } = require('./cryptoCompareService');
+const { saveTradeSnapshot } = require('./tradeService');
 const Signal = require('../models/Signal');
 const SystemConfig = require('../models/SystemConfig');
-const { saveTradeSnapshot } = require('./tradeService'); // Integration: Import trade logger
 const { enhancedAnalyze } = require('./aiAnalyst');
-
-
-/**
- * INTEGRATION HINT:
- * Inside your signal generation loop, after creating a signal:
- * 
- * const trade = await saveTradeSnapshot({
- *   coin: symbol,
- *   setup: signalResult.trigger,
- *   rsi: currentRsi,
- *   volumeRatio: volResult.ratio,
- *   emaSlope: currentSlope,
- *   atrPct: currentAtrPct,
- *   btcMomentum: btcTrend,
- *   confidence: totalConfidence,
- *   aiScore: aiAdjustment
- * });
- * 
- * // Store trade._id in your signal or position tracker to update result later
- */
 
 // ============================================================================
 // CONFIGURATION
@@ -44,7 +25,7 @@ const CHECK_INTERVAL_MS = 5 * 60 * 1000;  // 5 minutes
 
 // Quality thresholds (dynamic - auto-learning adjusts these)
 const CONFIDENCE_THRESHOLD_KEY = 'confidence_threshold';
-const DEFAULT_MIN_CONFIDENCE = 65;
+const DEFAULT_MIN_CONFIDENCE = 60;
 
 // Local cache for threshold (DB-backed, persisted across restarts)
 let cachedMinConfidence = DEFAULT_MIN_CONFIDENCE;
@@ -69,6 +50,7 @@ let lastLearningCheck = 0;
 // Engine status for health monitoring
 let engineRunning = false;
 let engineStartTime = null;
+let engineTickInProgress = false;
 let cachedResolvedCoins = [];
 let cachedCoinListUntil = 0;
 let cachedTradableSymbols = new Set();
@@ -246,6 +228,73 @@ const COIN_NAME_MAP = {
   'AVAX': 'Avalanche',
   'LINK': 'Chainlink'
 };
+
+const BULLISH_NEWS_KEYWORDS = [
+  'breakout', 'surge', 'rally', 'buy', 'bullish', 'pump', 'partnership', 'launch', 'adoption'
+];
+
+const BEARISH_NEWS_KEYWORDS = [
+  'crash', 'dump', 'bearish', 'sell', 'hack', 'ban', 'lawsuit', 'fear', 'drop', 'scam'
+];
+
+function countKeywordHits(text, keywords) {
+  return keywords.reduce((count, keyword) => {
+    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const matches = text.match(new RegExp(`\\b${escaped}\\b`, 'g'));
+    return count + (matches ? matches.length : 0);
+  }, 0);
+}
+
+/**
+ * Calculate simple news sentiment score for a symbol.
+ * Returns a normalized score from -1.0 (very bearish) to +1.0 (very bullish).
+ * On fetch errors or empty data, returns 0 silently.
+ */
+async function calcNewsSentiment(symbol) {
+  try {
+    const normalized = String(symbol || '').trim().toUpperCase();
+    if (!normalized) return 0;
+
+    const baseSymbol = normalized.endsWith('USDT')
+      ? normalized.slice(0, -4)
+      : normalized;
+    if (!baseSymbol) return 0;
+
+    const articles = await getNews(baseSymbol, 10);
+
+    if (!Array.isArray(articles) || articles.length === 0) {
+      return 0;
+    }
+
+    const recentArticles = articles.slice(0, 10);
+    let aggregateScore = 0;
+    let scoredArticles = 0;
+
+    for (const article of recentArticles) {
+      const headline = String(article?.title || '');
+      const summary = String(article?.summary || article?.body || '');
+      const text = `${headline} ${summary}`.toLowerCase();
+      if (!text.trim()) continue;
+
+      const bullishHits = countKeywordHits(text, BULLISH_NEWS_KEYWORDS);
+      const bearishHits = countKeywordHits(text, BEARISH_NEWS_KEYWORDS);
+      const totalHits = bullishHits + bearishHits;
+      if (totalHits === 0) continue;
+
+      aggregateScore += (bullishHits - bearishHits) / totalHits;
+      scoredArticles += 1;
+    }
+
+    if (scoredArticles === 0) {
+      return 0;
+    }
+
+    const score = aggregateScore / scoredArticles;
+    return Math.max(-1, Math.min(1, Number(score.toFixed(3))));
+  } catch (error) {
+    return 0;
+  }
+}
 
 /**
  * Calculate Simple Moving Average (SMA)
@@ -651,7 +700,7 @@ function detectAdvancedSignal(closes, klines) {
   // === BUY SIGNAL TRIGGERS ===
   // Trigger 1: Price testing EMA21 from above (pullback to EMA = buy opportunity)
   // AND EMA21 slope is positive (uptrend intact)
-  if (slope > 0.1) {
+  if (slope > 0.05) {
     // Check EMA21 test (price pulled back to EMA21)
     const testingEma21 = currentPrice <= ema21 && Math.abs(currentPrice - ema21) / currentPrice * 100 <= 0.3;
     if (testingEma21) {
@@ -705,7 +754,7 @@ function detectAdvancedSignal(closes, klines) {
   // === SELL SIGNAL TRIGGERS ===
   // Trigger 1: Price testing EMA21 from below (pullback to EMA = sell opportunity)
   // AND EMA21 slope is negative (downtrend intact)
-  if (slope < -0.1) {
+  if (slope < -0.05) {
     // Check EMA21 test (price pulled back to EMA21)
     const testingEma21 = currentPrice >= ema21 && Math.abs(currentPrice - ema21) / currentPrice * 100 <= 0.3;
     if (testingEma21) {
@@ -932,23 +981,23 @@ async function getBTCTrend() {
 
 /**
  * PHASE 1: Market Regime Discovery
- * Determines if market is in a TRENDING or RANGING state.
- * RANGING markets are blocked to prevent whipsaws in flat conditions.
+ * Determines if market is in a TRENDING, CONSOLIDATING, or RANGING state.
+ * Only truly dead markets are marked RANGING.
  * 
  * @param {number[]} closes - Array of closing prices
  * @param {number} ema9 - Current EMA9
  * @param {number} ema21 - Current EMA21
  * @param {number} slope - Current EMA21 slope
- * @returns {string} 'TRENDING' or 'RANGING'
+ * @returns {string} 'TRENDING' | 'CONSOLIDATING' | 'RANGING'
  */
 function detectMarketRegime(closes, ema9, ema21, slope) {
   const absSlope = Math.abs(slope);
   const bb = calculateBollingerBands(closes);
   
   // RANGING Condition: 
-  // 1. Flat slope (< 0.1%) AND 
+  // 1. Very flat slope (< 0.05%) AND 
   // 2. Narrow bandwidth (< 1.5%) = Low volatility stagnation
-  if (absSlope < 0.1 && bb.bandwidth < 1.5) {
+  if (absSlope < 0.05 && bb.bandwidth < 1.5) {
     return 'RANGING';
   }
 
@@ -961,8 +1010,15 @@ function detectMarketRegime(closes, ema9, ema21, slope) {
     return 'TRENDING';
   }
 
-  // Default to RANGING if structure is choppy or non-aligned
-  return 'RANGING';
+  // CONSOLIDATING Condition:
+  // 1. Moderate slope (0.05% to <0.1%) OR
+  // 2. Moderate bandwidth (1.5% to 3.0%)
+  if ((absSlope >= 0.05 && absSlope < 0.1) || (bb.bandwidth >= 1.5 && bb.bandwidth <= 3.0)) {
+    return 'CONSOLIDATING';
+  }
+
+  // Non-trending but not dead-flat: treat as consolidating (allow breakout setups)
+  return 'CONSOLIDATING';
 }
 
 /**
@@ -1253,10 +1309,20 @@ function calculateATR(candles, period = 14) {
  * @param {number} rsi - RSI value
  * @returns {number} RSI score
  */
-function calcRSIScore(rsi) {
-  if (rsi >= 45 && rsi <= 55) return 15;
-  if ((rsi >= 35 && rsi < 45) || (rsi > 55 && rsi <= 65)) return 10;
-  return 5;
+function calcRSIScore(rsi, trend) {
+  if (trend === 'BUY') {
+    if (rsi >= 30 && rsi <= 50) return 15; // oversold recovery - best BUY zone
+    if (rsi > 50 && rsi <= 60) return 10; // neutral-bullish
+    if (rsi > 60 && rsi <= 70) return 5; // getting overbought
+    return 3; // extremes
+  }
+  if (trend === 'SELL') {
+    if (rsi >= 50 && rsi <= 70) return 15; // overbought recovery - best SELL zone
+    if (rsi >= 40 && rsi < 50) return 10; // neutral-bearish
+    if (rsi >= 30 && rsi < 40) return 5; // getting oversold
+    return 3; // extremes
+  }
+  return 5; // fallback
 }
 
 /**
@@ -1448,7 +1514,7 @@ function calcVolumeScore(volumeData, volumeDelta, trend) {
     } else if (volumeDelta.neutral) {
       return Math.round(baseScore * 0.5);
     } else {
-      return 0;
+      return 2;
     }
   } else if (trend === 'SELL') {
     if (volumeDelta.sellDominant) {
@@ -1456,7 +1522,7 @@ function calcVolumeScore(volumeData, volumeDelta, trend) {
     } else if (volumeDelta.neutral) {
       return Math.round(baseScore * 0.5);
     } else {
-      return 0;
+      return 2;
     }
   }
 
@@ -1522,7 +1588,7 @@ function calcTechnicalScore(params) {
   // Use advanced signal for trend scoring (new v2 logic)
   const trend = advancedSignal?.trend;
 
-  const rsiScore = calcRSIScore(rsi);
+  const rsiScore = calcRSIScore(rsi, trend);
   const macdScore = calcMACDScore(macdData, trend);
   const trendScore = calcTrendScore(advancedSignal, momentum);
   const volumeScore = calcVolumeScore(volumeData, volumeDelta, trend);
@@ -1983,6 +2049,7 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   const regSlope = calculateEMASlope(trendCloses);
   const regime = detectMarketRegime(allCloses, regEma9, regEma21, regSlope);
 
+  // Block only dead-flat markets; allow TRENDING and CONSOLIDATING to continue.
   if (regime === 'RANGING') {
     console.log(`[ENGINE] ${coin} skipped → Market Regime is RANGING (M2C2 Phase 1 Filter)`);
     return null;
@@ -2137,6 +2204,14 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
 
   // Calculate final confidence with all adjustments
   let confidence = Math.max(0, Math.min(100, baseConfidence + confidenceBoost + confidencePenalty + weakPenalty + volumeDeltaPenalty + btcConfidencePenalty));
+  const sentimentScore = await calcNewsSentiment(coin);
+  let sentimentConfidenceAdjustment = 0;
+  if (sentimentScore > 0.3) {
+    sentimentConfidenceAdjustment = 3;
+  } else if (sentimentScore < -0.3) {
+    sentimentConfidenceAdjustment = -3;
+  }
+  confidence = Math.max(0, Math.min(100, confidence + sentimentConfidenceAdjustment));
 
   // Determine signal quality level
   let fourHPenalty = 0;
@@ -2169,28 +2244,13 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
       if (fourHTrend === 'bearish' && fourHStrength === 'strong') {
         // BLOCK: Strong bearish 4H opposes BUY
         console.log(`[ENGINE] ${coin} BLOCKED → Signal blocked: 4H strong bearish trend opposes 1H BUY | 4H:${fourHTrend} ${fourHStrength} slope:${fourHSlope.toFixed(3)}%`);
-        console.log(JSON.stringify({
-          symbol: coin,
-          reason: '4H hard filter',
-          signalType: 'BUY',
-          fourHtrend: fourHTrend,
-          fourHstrength: fourHStrength,
-          fourHslope: fourHSlope
-        }));
         return null;
       }
       if (fourHTrend === 'bearish' && fourHStrength === 'moderate') {
         // BLOCK: Moderate bearish 4H opposes BUY
         console.log(`[ENGINE] ${coin} BLOCKED → Signal blocked: 4H moderate bearish trend opposes 1H BUY | 4H:${fourHTrend} ${fourHStrength} slope:${fourHSlope.toFixed(3)}%`);
-        console.log(JSON.stringify({
-          symbol: coin,
-          reason: '4H hard filter',
-          signalType: 'BUY',
-          fourHtrend: fourHTrend,
-          fourHstrength: fourHStrength,
-          fourHslope: fourHSlope
-        }));
-        return null;
+        fourHPenalty = -20;
+        confidence = Math.max(0, confidence + fourHPenalty);
       }
       if (fourHTrend === 'bearish' && fourHStrength === 'weak') {
         // DO NOT BLOCK: Weak bearish - apply -15 confidence penalty instead
@@ -2206,28 +2266,13 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
       if (fourHTrend === 'bullish' && fourHStrength === 'strong') {
         // BLOCK: Strong bullish 4H opposes SELL
         console.log(`[ENGINE] ${coin} BLOCKED → Signal blocked: 4H strong bullish trend opposes 1H SELL | 4H:${fourHTrend} ${fourHStrength} slope:${fourHSlope.toFixed(3)}%`);
-        console.log(JSON.stringify({
-          symbol: coin,
-          reason: '4H hard filter',
-          signalType: 'SELL',
-          fourHtrend: fourHTrend,
-          fourHstrength: fourHStrength,
-          fourHslope: fourHSlope
-        }));
         return null;
       }
       if (fourHTrend === 'bullish' && fourHStrength === 'moderate') {
         // BLOCK: Moderate bullish 4H opposes SELL
         console.log(`[ENGINE] ${coin} BLOCKED → Signal blocked: 4H moderate bullish trend opposes 1H SELL | 4H:${fourHTrend} ${fourHStrength} slope:${fourHSlope.toFixed(3)}%`);
-        console.log(JSON.stringify({
-          symbol: coin,
-          reason: '4H hard filter',
-          signalType: 'SELL',
-          fourHtrend: fourHTrend,
-          fourHstrength: fourHStrength,
-          fourHslope: fourHSlope
-        }));
-        return null;
+        fourHPenalty = -20;
+        confidence = Math.max(0, confidence + fourHPenalty);
       }
       if (fourHTrend === 'bullish' && fourHStrength === 'weak') {
         // DO NOT BLOCK: Weak bullish - apply -15 confidence penalty instead
@@ -2283,12 +2328,14 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   // Build signal data
   const signalData = buildSignalData(coin, trend, currentPrice, atr);
   signalData.confidence = confidence;
+  signalData.sentimentScore = sentimentScore;
   signalData.signalQuality = signalQuality;
   signalData.confidenceBreakdown = {
     technical: Math.round(technicalScore * 0.7),
     market: normalizedMarketScore,
-    bonus: confidenceBoost,
-    penalty: confidencePenalty + weakPenalty + volumeDeltaPenalty + btcConfidencePenalty + fourHPenalty + executionAdjustment
+    sentiment: sentimentScore,
+    bonus: confidenceBoost + (sentimentConfidenceAdjustment > 0 ? sentimentConfidenceAdjustment : 0),
+    penalty: confidencePenalty + weakPenalty + volumeDeltaPenalty + btcConfidencePenalty + fourHPenalty + executionAdjustment + (sentimentConfidenceAdjustment < 0 ? sentimentConfidenceAdjustment : 0)
   };
   // Add rsi and macd to reason
   reasons.rsi = rsi > 70 ? 'OVERBOUGHT' : rsi < 30 ? 'OVERSOLD' : rsi > 55 ? 'BULLISH' : rsi < 45 ? 'BEARISH' : 'NEUTRAL';
@@ -2341,6 +2388,22 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
 
   const signal = new Signal(signalData);
   await signal.save();
+
+  try {
+    await saveTradeSnapshot({
+      coin: signalData.coin,
+      setup: signalData.trigger,
+      rsi: signalData.indicators?.rsi ?? null,
+      volumeRatio: signalData.indicators?.volumeRatio ?? null,
+      emaSlope: signalData.indicators?.emaSlope ?? null,
+      atrPct: signalData.indicators?.atrPct ?? null,
+      btcMomentum: signalData.btcTrend ?? null,
+      confidence: signalData.confidence,
+      aiScore: signalData.aiScore ?? null
+    });
+  } catch (error) {
+    console.error(`[TradeSnapshot] Failed to save snapshot: ${error.message}`);
+  }
 
   // Record cooldown timestamp
   lastSignalTimes.set(coin, Date.now());
@@ -2411,10 +2474,6 @@ async function runAutoLearning() {
     // FIXED: Win rate based ONLY on taken signals
     const winRate = takenCount > 0 ? (wins / takenCount) * 100 : 0;
 
-    // Calculate rates
-    const missedRate = totalGenerated > 0 ? (missedOpportunities / totalGenerated) * 100 : 0;
-    const takenRate = totalGenerated > 0 ? (takenCount / totalGenerated) * 100 : 0;
-
     const oldThreshold = getConfidenceThreshold();
     let newThreshold = oldThreshold;
     let reason = 'no change';
@@ -2473,49 +2532,59 @@ async function runAutoLearning() {
 
 
 async function runEngine() {
-  // Run auto-learning before generating signals
-  await runAutoLearning();
-
-  console.log(`[ENGINE] Running signal generation (threshold: ${getConfidenceThreshold()})...`);
-  let created = 0;
-
-  // Fetch market data once for all coins to avoid rate limiting
-  const topSelectorCount = parseTopSelector(COIN_SELECTOR) || 0;
-  const marketDataLimit = Math.min(250, Math.max(50, SIGNAL_TOP_COINS, topSelectorCount));
-  let topCoins = [];
-  try {
-    topCoins = await getTopCoins(marketDataLimit);
-  } catch (err) {
-    console.log(`[ENGINE] Failed to fetch market data: ${err.message}`);
+  if (engineTickInProgress) {
+    console.log('[ENGINE] Previous cycle still running. Skipping overlapping tick.');
+    return;
   }
 
-  // Resolve coin universe for this cycle
-  let coinsToAnalyze = [];
+  engineTickInProgress = true;
   try {
-    coinsToAnalyze = await resolveCoins(topCoins);
-  } catch (err) {
-    console.log(`[ENGINE] Failed to resolve coin list: ${err.message}`);
-    coinsToAnalyze = ['BTCUSDT'];
-  }
+    // Run auto-learning before generating signals
+    await runAutoLearning();
 
-  console.log(`[ENGINE] Analyzing ${coinsToAnalyze.length} coin(s). Selector: ${COIN_SELECTOR}`);
+    console.log(`[ENGINE] Running signal generation (threshold: ${getConfidenceThreshold()})...`);
+    let created = 0;
 
-  // Fetch global BTC trend once per cycle to avoid redundant API calls
-  const btcTrend = await getBTCTrend();
-
-  for (const coin of coinsToAnalyze) {
+    // Fetch market data once for all coins to avoid rate limiting
+    const topSelectorCount = parseTopSelector(COIN_SELECTOR) || 0;
+    const marketDataLimit = Math.min(250, Math.max(50, SIGNAL_TOP_COINS, topSelectorCount));
+    let topCoins = [];
     try {
-      const signal = await generateSignalForCoin(coin, topCoins, btcTrend);
-      if (signal) created++;
-    } catch (error) {
-      console.error(`[ENGINE] ${coin}: Error - ${error.message}`);
+      topCoins = await getTopCoins(marketDataLimit);
+    } catch (err) {
+      console.log(`[ENGINE] Failed to fetch market data: ${err.message}`);
     }
-  }
 
-  if (created > 0) {
-    console.log(`[ENGINE] Done. ${created} signal(s) generated.`);
-  } else {
-    console.log(`[ENGINE] Done. No signals generated.`);
+    // Resolve coin universe for this cycle
+    let coinsToAnalyze = [];
+    try {
+      coinsToAnalyze = await resolveCoins(topCoins);
+    } catch (err) {
+      console.log(`[ENGINE] Failed to resolve coin list: ${err.message}`);
+      coinsToAnalyze = ['BTCUSDT'];
+    }
+
+    console.log(`[ENGINE] Analyzing ${coinsToAnalyze.length} coin(s). Selector: ${COIN_SELECTOR}`);
+
+    // Fetch global BTC trend once per cycle to avoid redundant API calls
+    const btcTrend = await getBTCTrend();
+
+    for (const coin of coinsToAnalyze) {
+      try {
+        const signal = await generateSignalForCoin(coin, topCoins, btcTrend);
+        if (signal) created++;
+      } catch (error) {
+        console.error(`[ENGINE] ${coin}: Error - ${error.message}`);
+      }
+    }
+
+    if (created > 0) {
+      console.log(`[ENGINE] Done. ${created} signal(s) generated.`);
+    } else {
+      console.log(`[ENGINE] Done. No signals generated.`);
+    }
+  } finally {
+    engineTickInProgress = false;
   }
 }
 
@@ -2526,8 +2595,14 @@ async function startSignalEngine() {
   engineRunning = true;
   engineStartTime = new Date();
 
-  runEngine();
-  setInterval(runEngine, CHECK_INTERVAL_MS);
+  runEngine().catch((error) => {
+    console.error(`[ENGINE] Initial run failed: ${error.message}`);
+  });
+  setInterval(() => {
+    runEngine().catch((error) => {
+      console.error(`[ENGINE] Scheduled run failed: ${error.message}`);
+    });
+  }, CHECK_INTERVAL_MS);
   console.log(`[ENGINE] Started. Selector:${COIN_SELECTOR} | Interval:${CHECK_INTERVAL_MS / 60000}min | MaxCoins:${SIGNAL_MAX_COINS}`);
 }
 
@@ -2547,3 +2622,4 @@ module.exports = {
   getEngineStatus,
   getDynamicThreshold: getConfidenceThreshold
 };
+

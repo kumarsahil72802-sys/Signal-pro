@@ -255,8 +255,8 @@ const getStats = async (req, res) => {
 
     // FIXED: Include all new metrics in response
     res.json({
-      // Legacy fields (kept for backward compatibility)
-      totalSignals: totalTaken,
+      // Legacy field (kept for backward compatibility)
+      totalSignals: totalGenerated,
       wins: overall.wins || 0,
       losses: overall.losses || 0,
       winRate: Math.round(winRate * 10) / 10,

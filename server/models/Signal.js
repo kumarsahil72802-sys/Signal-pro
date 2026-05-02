@@ -6,7 +6,7 @@ const signalSchema = new mongoose.Schema({
     required: true,
     uppercase: true,
     trim: true,
-    match: [/^[A-Z]{2,10}USDT$/, 'Coin must be a valid USDT pair (e.g. BTCUSDT)']
+    match: [/^(?:[A-Z]{2,10}|[0-9]{1,4}[A-Z]{2,10})USDT$/, 'Coin must be a valid USDT pair (e.g. BTCUSDT)']
   },
   type: { type: String, enum: ['BUY', 'SELL'], required: true },
   entryPrice: { type: Number, required: true, min: 0 },
@@ -22,7 +22,7 @@ const signalSchema = new mongoose.Schema({
     bonus: { type: Number, default: 0 },
     penalty: { type: Number, default: 0 }
   },
-  sentimentScore: { type: Number, min: 0, max: 20, default: 10 },
+  sentimentScore: { type: Number, min: -1, max: 1, default: 0 },
   reason: {
     trend: { type: String, default: 'NEUTRAL' },
     momentum: { type: String, default: 'WEAK' },

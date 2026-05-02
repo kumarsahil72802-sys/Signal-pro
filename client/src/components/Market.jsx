@@ -3,6 +3,10 @@ import { getCoinNews, getMarketChart } from '../services/api'
 
 const MARKET_RENDER_CHUNK = 12
 const CHART_INTERVALS = ['5m', '15m', '1h', '4h', '1d']
+const CHART_VIEWS = [
+  { value: 'line', label: 'Line' },
+  { value: 'candles', label: 'Candles' },
+]
 const MARKET_PRESETS = {
   balanced: {
     label: 'Flow Prime',
@@ -75,6 +79,28 @@ const formatPairLabel = (rawPair) => {
   if (!quote) return pair
   const base = pair.slice(0, -quote.length)
   return `${base} / ${quote}`
+}
+
+const splitMarketPair = (rawPair) => {
+  const pair = normalizeTickerSymbol(rawPair)
+  if (!pair) return { base: '', quote: '' }
+
+  const quote = QUOTE_SUFFIXES.find((suffix) => pair.endsWith(suffix) && pair.length > suffix.length) || 'USDT'
+  const base = pair.endsWith(quote) ? pair.slice(0, -quote.length) : pair
+  return { base, quote }
+}
+
+const buildBinanceTradeUrl = (rawPair) => {
+  const { base, quote } = splitMarketPair(rawPair)
+  if (!base || !quote) return ''
+  return `https://www.binance.com/en/trade/${base}_${quote}?type=spot`
+}
+
+const buildTradingViewChartUrl = (rawPair) => {
+  const { base, quote } = splitMarketPair(rawPair)
+  if (!base || !quote) return ''
+  const symbol = `BINANCE:${base}${quote}`
+  return `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(symbol)}`
 }
 
 const getFallbackLogoUrl = (symbol) => {
@@ -164,6 +190,36 @@ const formatTimeAgo = (unixSeconds) => {
   return publishedAt.toLocaleDateString()
 }
 
+const formatDateTime = (value) => {
+  if (!value) return 'Unknown'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Unknown'
+  return date.toLocaleString()
+}
+
+const buildSparklineDetailPoints = (prices = []) => {
+  if (!Array.isArray(prices) || prices.length < 2) return []
+
+  const numericPrices = prices
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value))
+
+  if (numericPrices.length < 2) return []
+
+  const now = Date.now()
+  const stepMs = 60 * 60 * 1000
+  const startTs = now - (numericPrices.length - 1) * stepMs
+
+  return numericPrices.map((price, index) => ({
+    time: startTs + (index * stepMs),
+    open: price,
+    high: price,
+    low: price,
+    close: price,
+    volume: 0,
+  }))
+}
+
 const getExecutionBadgeClass = (quality) => {
   if (quality === 'GOOD') return 'bg-[#173427] text-[#64f2b3] border-[#2a6b4e]'
   if (quality === 'MODERATE') return 'bg-[#3a2d10] text-[#ffd56a] border-[#6b551f]'
@@ -173,13 +229,27 @@ const getExecutionBadgeClass = (quality) => {
 
 const CoinIcon = ({ symbol, name, image, imageCandidates }) => {
   const logoCandidates = getLogoCandidates(symbol, image, imageCandidates)
-  const [candidateIndex, setCandidateIndex] = useState(0)
   const initials = String(symbol || '?').replace(/[^a-z0-9]/ig, '').toUpperCase().slice(0, 2) || '?'
-  const logoSrc = logoCandidates[candidateIndex] || ''
+  const logoSrc = logoCandidates[0] || ''
 
-  useEffect(() => {
-    setCandidateIndex(0)
-  }, [symbol, image])
+  const handleLogoError = (event) => {
+    const target = event.currentTarget
+    const currentIndex = Number(target.dataset.idx || '0')
+    const nextIndex = currentIndex + 1
+    const nextSrc = logoCandidates[nextIndex] || ''
+
+    if (nextSrc) {
+      target.dataset.idx = String(nextIndex)
+      target.src = nextSrc
+      return
+    }
+
+    target.style.display = 'none'
+    const fallback = target.nextElementSibling
+    if (fallback) {
+      fallback.style.display = 'flex'
+    }
+  }
 
   if (!logoSrc) {
     return (
@@ -190,13 +260,19 @@ const CoinIcon = ({ symbol, name, image, imageCandidates }) => {
   }
 
   return (
-    <img
-      src={logoSrc}
-      alt={name || symbol}
-      className="w-10 h-10 rounded-full object-cover shadow-sm border border-[#31435f]"
-      onError={() => setCandidateIndex((current) => current + 1)}
-      loading="lazy"
-    />
+    <div className="relative w-10 h-10">
+      <img
+        src={logoSrc}
+        alt={name || symbol}
+        data-idx="0"
+        className="w-10 h-10 rounded-full object-cover shadow-sm border border-[#31435f]"
+        onError={handleLogoError}
+        loading="lazy"
+      />
+      <div className={`hidden absolute inset-0 w-10 h-10 rounded-full bg-gradient-to-br ${getBadgeTone(symbol)} border border-[#3b5380] items-center justify-center text-[#f6dd98] font-bold text-xs shadow-sm`}>
+        {initials}
+      </div>
+    </div>
   )
 }
 
@@ -238,30 +314,50 @@ const MiniSparkline = ({ prices, positive }) => {
   )
 }
 
-const DetailChart = ({ points = [] }) => {
+const DetailChart = ({ points = [], mode = 'line', expanded = false, chartIdPrefix = 'chart' }) => {
   if (!Array.isArray(points) || points.length < 2) {
     return (
-      <div className="h-56 rounded-2xl border border-[#273958] bg-[#0d172a] flex items-center justify-center text-sm text-[#8ea2c4]">
+      <div className={`${expanded ? 'h-[65vh] min-h-[420px] max-h-[760px]' : 'h-56'} rounded-2xl border border-[#273958] bg-[#0d172a] flex items-center justify-center text-sm text-[#8ea2c4]`}>
         Chart unavailable for this interval
       </div>
     )
   }
 
-  const values = points.map((point) => point.close).filter((value) => Number.isFinite(value))
-  if (values.length < 2) {
+  const candles = points
+    .map((point, index) => {
+      const open = Number(point?.open)
+      const high = Number(point?.high)
+      const low = Number(point?.low)
+      const close = Number(point?.close)
+      const time = Number(point?.time)
+
+      if (![open, high, low, close].every((value) => Number.isFinite(value))) return null
+      return {
+        key: `${time || index}-${index}`,
+        time,
+        open,
+        high,
+        low,
+        close,
+      }
+    })
+    .filter(Boolean)
+
+  if (candles.length < 2) {
     return (
-      <div className="h-56 rounded-2xl border border-[#273958] bg-[#0d172a] flex items-center justify-center text-sm text-[#8ea2c4]">
+      <div className={`${expanded ? 'h-[65vh] min-h-[420px] max-h-[760px]' : 'h-56'} rounded-2xl border border-[#273958] bg-[#0d172a] flex items-center justify-center text-sm text-[#8ea2c4]`}>
         Chart unavailable for this interval
       </div>
     )
   }
 
+  const values = candles.map((candle) => candle.close)
   const width = 820
   const height = 240
   const padX = 22
   const padY = 18
-  const min = Math.min(...values)
-  const max = Math.max(...values)
+  const min = Math.min(...candles.map((candle) => candle.low))
+  const max = Math.max(...candles.map((candle) => candle.high))
   const range = Math.max(max - min, 1e-9)
 
   const linePoints = values.map((value, index) => {
@@ -276,35 +372,99 @@ const DetailChart = ({ points = [] }) => {
 
   const fillPath = `${linePath} L ${linePoints[linePoints.length - 1].x.toFixed(2)} ${(height - padY).toFixed(2)} L ${linePoints[0].x.toFixed(2)} ${(height - padY).toFixed(2)} Z`
   const isPositive = values[values.length - 1] >= values[0]
+  const fillId = `${chartIdPrefix}-${mode}-fill`
+  const slotWidth = (width - (padX * 2)) / candles.length
+  const bodyWidth = Math.max(2.2, Math.min(10, slotWidth * 0.62))
+  const yFromPrice = (price) => padY + ((max - price) / range) * (height - (padY * 2))
+  const chartHeightClass = expanded ? 'h-[65vh] min-h-[420px] max-h-[760px]' : 'h-56'
+  const gridRows = [0, 0.25, 0.5, 0.75, 1]
 
   return (
     <div className="rounded-2xl border border-[#273958] bg-[#0d172a] p-3 sm:p-4">
-      <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-56">
+      <svg viewBox={`0 0 ${width} ${height}`} className={`w-full ${chartHeightClass}`}>
         <defs>
-          <linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1">
+          <linearGradient id={fillId} x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor={isPositive ? '#19c37d' : '#f6465d'} stopOpacity="0.36" />
             <stop offset="100%" stopColor={isPositive ? '#19c37d' : '#f6465d'} stopOpacity="0" />
           </linearGradient>
         </defs>
 
+        {gridRows.map((ratio) => {
+          const y = padY + ((height - (padY * 2)) * ratio)
+          return (
+            <line
+              key={`grid-${ratio}`}
+              x1={padX}
+              y1={y}
+              x2={width - padX}
+              y2={y}
+              stroke="#203550"
+              strokeWidth="1"
+              strokeDasharray={ratio === 1 ? '0' : '4 5'}
+            />
+          )
+        })}
+
         <line x1={padX} y1={height - padY} x2={width - padX} y2={height - padY} stroke="#29405f" strokeWidth="1" />
         <line x1={padX} y1={padY} x2={padX} y2={height - padY} stroke="#29405f" strokeWidth="1" />
 
-        <path d={fillPath} fill="url(#chartFill)" />
-        <path
-          d={linePath}
-          fill="none"
-          stroke={isPositive ? '#64f2b3' : '#ff8fa1'}
-          strokeWidth="3"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
+        {mode === 'candles' ? (
+          candles.map((candle, index) => {
+            const xCenter = padX + (slotWidth * index) + (slotWidth / 2)
+            const yOpen = yFromPrice(candle.open)
+            const yClose = yFromPrice(candle.close)
+            const yHigh = yFromPrice(candle.high)
+            const yLow = yFromPrice(candle.low)
+            const isGreen = candle.close >= candle.open
+            const bodyTop = Math.min(yOpen, yClose)
+            const bodyHeight = Math.max(1.4, Math.abs(yClose - yOpen))
+            const color = isGreen ? '#64f2b3' : '#ff8fa1'
+
+            return (
+              <g key={candle.key}>
+                <line
+                  x1={xCenter}
+                  y1={yHigh}
+                  x2={xCenter}
+                  y2={yLow}
+                  stroke={color}
+                  strokeWidth="1.3"
+                />
+                <rect
+                  x={xCenter - (bodyWidth / 2)}
+                  y={bodyTop}
+                  width={bodyWidth}
+                  height={bodyHeight}
+                  fill={color}
+                  rx="1"
+                />
+              </g>
+            )
+          })
+        ) : (
+          <>
+            <path d={fillPath} fill={`url(#${fillId})`} />
+            <path
+              d={linePath}
+              fill="none"
+              stroke={isPositive ? '#64f2b3' : '#ff8fa1'}
+              strokeWidth="3"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </>
+        )}
       </svg>
 
       <div className="mt-3 flex items-center justify-between text-xs text-[#8ea2c4]">
         <span>Low {formatPrice(min, 6)}</span>
         <span>High {formatPrice(max, 6)}</span>
       </div>
+      {mode === 'candles' && (
+        <p className="mt-2 text-[11px] text-[#8aa3cb]">
+          Green candle = close above open | Red candle = close below open
+        </p>
+      )}
     </div>
   )
 }
@@ -490,8 +650,21 @@ const MarketCard = memo(function MarketCard({ coin, quality, qualityApiFailed, o
   )
 })
 
-function CoinDetailOverlay({ coin, quality, qualityApiFailed, onClose }) {
+function CoinDetailOverlay({
+  coin,
+  quality,
+  qualityApiFailed,
+  onClose,
+  onPrevCoin,
+  onNextCoin,
+  hasPrevCoin = false,
+  hasNextCoin = false,
+  prevCoinSymbol = '',
+  nextCoinSymbol = '',
+}) {
   const [chartInterval, setChartInterval] = useState('15m')
+  const [chartView, setChartView] = useState('line')
+  const [chartFullscreen, setChartFullscreen] = useState(false)
   const [chartLoading, setChartLoading] = useState(true)
   const [chartError, setChartError] = useState('')
   const [chartPoints, setChartPoints] = useState([])
@@ -500,6 +673,7 @@ function CoinDetailOverlay({ coin, quality, qualityApiFailed, onClose }) {
   const [newsLoading, setNewsLoading] = useState(true)
   const [newsError, setNewsError] = useState('')
   const [coinNews, setCoinNews] = useState([])
+  const [newsSourceLabel, setNewsSourceLabel] = useState('Coin specific')
 
   useEffect(() => {
     if (!coin?.symbol) return undefined
@@ -573,11 +747,22 @@ function CoinDetailOverlay({ coin, quality, qualityApiFailed, onClose }) {
       try {
         const response = await getCoinNews(coin.symbol.toUpperCase(), 8)
         if (ignore) return
-        const items = Array.isArray(response.data) ? response.data : []
+        let items = Array.isArray(response.data) ? response.data : []
+        let sourceLabel = 'Coin specific'
+
+        if (items.length === 0) {
+          const fallbackResponse = await getCoinNews('', 8)
+          if (ignore) return
+          items = Array.isArray(fallbackResponse.data) ? fallbackResponse.data : []
+          sourceLabel = 'Market context'
+        }
+
         setCoinNews(items)
+        setNewsSourceLabel(sourceLabel)
       } catch (error) {
         if (ignore) return
         setCoinNews([])
+        setNewsSourceLabel('Coin specific')
         setNewsError(error.response?.data?.message || 'Unable to load latest news')
       } finally {
         if (!ignore) setNewsLoading(false)
@@ -593,7 +778,22 @@ function CoinDetailOverlay({ coin, quality, qualityApiFailed, onClose }) {
 
   useEffect(() => {
     const onKeyDown = (event) => {
-      if (event.key === 'Escape') onClose()
+      if (event.key === 'ArrowLeft' && hasPrevCoin) {
+        event.preventDefault()
+        onPrevCoin?.()
+        return
+      }
+      if (event.key === 'ArrowRight' && hasNextCoin) {
+        event.preventDefault()
+        onNextCoin?.()
+        return
+      }
+      if (event.key !== 'Escape') return
+      if (chartFullscreen) {
+        setChartFullscreen(false)
+        return
+      }
+      onClose()
     }
 
     const previousOverflow = document.body.style.overflow
@@ -604,19 +804,25 @@ function CoinDetailOverlay({ coin, quality, qualityApiFailed, onClose }) {
       window.removeEventListener('keydown', onKeyDown)
       document.body.style.overflow = previousOverflow
     }
-  }, [onClose])
+  }, [chartFullscreen, hasNextCoin, hasPrevCoin, onClose, onNextCoin, onPrevCoin])
 
   if (!coin) return null
 
   const isPositive = (coin.price_change_percentage_24h || 0) >= 0
   const executionQuality = (!qualityApiFailed && quality?.executionQuality) ? quality.executionQuality : 'N/A'
-  const chartValues = chartPoints.map((point) => point.close).filter((value) => Number.isFinite(value))
+  const fallbackChartPoints = buildSparklineDetailPoints(coin?.sparkline_in_7d?.price)
+  const hasLiveChart = chartPoints.length >= 2
+  const hasFallbackChart = fallbackChartPoints.length >= 2
+  const chartPointsToRender = hasLiveChart ? chartPoints : fallbackChartPoints
+  const usingFallbackChart = !hasLiveChart && hasFallbackChart
+  const chartValues = chartPointsToRender.map((point) => point.close).filter((value) => Number.isFinite(value))
   const chartChangePct = chartValues.length > 1
     ? ((chartValues[chartValues.length - 1] - chartValues[0]) / chartValues[0]) * 100
     : null
-  const displayPair = chartSymbolUsed
-    ? formatPairLabel(chartSymbolUsed)
-    : `${normalizeTickerSymbol(coin.symbol)} / USDT`
+  const activePairSymbol = chartSymbolUsed || `${normalizeTickerSymbol(coin.symbol)}USDT`
+  const displayPair = formatPairLabel(activePairSymbol)
+  const binanceTradeUrl = buildBinanceTradeUrl(activePairSymbol)
+  const tradingViewUrl = buildTradingViewChartUrl(activePairSymbol)
   const currentPrice = toFiniteNumber(coin.current_price)
   const low24 = toFiniteNumber(coin.low_24h)
   const high24 = toFiniteNumber(coin.high_24h)
@@ -659,6 +865,18 @@ function CoinDetailOverlay({ coin, quality, qualityApiFailed, onClose }) {
   const spreadScore = Number.isFinite(spreadPct)
     ? clampPercent(100 - Math.min(spreadPct * 300, 100))
     : 0
+  const coreFundamentalCount = [
+    marketCap,
+    ath,
+    coin.atl,
+    circulating,
+    totalSupply,
+    maxSupply,
+    high24,
+    low24,
+  ].filter((value) => Number.isFinite(Number(value))).length
+  const coreFundamentalTotal = 8
+  const fundamentalsCoveragePct = Math.round((coreFundamentalCount / coreFundamentalTotal) * 100)
 
   return (
     <div className="fixed inset-0 z-50">
@@ -702,17 +920,76 @@ function CoinDetailOverlay({ coin, quality, qualityApiFailed, onClose }) {
                     <span className="rounded-full border border-[#3f5f8f] bg-[#152846] px-3 py-1 text-[11px] text-[#c9daf7] cc-mono">
                       Volatility {volatilityTone}
                     </span>
+                    <span className="rounded-full border border-[#356185] bg-[#132742] px-3 py-1 text-[11px] text-[#b9d6ff] cc-mono">
+                      Data {coreFundamentalCount}/{coreFundamentalTotal}
+                    </span>
                   </div>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="rounded-lg border border-[#35527f] bg-[#13243f] px-3 py-2 text-sm font-semibold text-[#c6d8f6] hover:border-[#5578ad]"
-                >
-                  Close
-                </button>
+                <div className="shrink-0 flex flex-col items-end gap-2">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={onPrevCoin}
+                      disabled={!hasPrevCoin}
+                      className={`rounded-lg border px-3 py-1.5 text-xs font-semibold ${
+                        hasPrevCoin
+                          ? 'border-[#3d5f8f] bg-[#122540] text-[#d5e5ff] hover:border-[#6289bd]'
+                          : 'border-[#294363] bg-[#101d32] text-[#708bb1] cursor-not-allowed'
+                      }`}
+                    >
+                      {hasPrevCoin ? `Prev ${prevCoinSymbol || ''}` : 'Prev'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onNextCoin}
+                      disabled={!hasNextCoin}
+                      className={`rounded-lg border px-3 py-1.5 text-xs font-semibold ${
+                        hasNextCoin
+                          ? 'border-[#3d5f8f] bg-[#122540] text-[#d5e5ff] hover:border-[#6289bd]'
+                          : 'border-[#294363] bg-[#101d32] text-[#708bb1] cursor-not-allowed'
+                      }`}
+                    >
+                      {hasNextCoin ? `Next ${nextCoinSymbol || ''}` : 'Next'}
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {binanceTradeUrl && (
+                      <a
+                        href={binanceTradeUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="rounded-lg border border-[#2f6e58] bg-[#123327] px-3 py-1.5 text-xs font-semibold text-[#89f2c9] hover:border-[#4ba27f]"
+                      >
+                        Open Binance
+                      </a>
+                    )}
+                    {tradingViewUrl && (
+                      <a
+                        href={tradingViewUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="rounded-lg border border-[#44639a] bg-[#13284a] px-3 py-1.5 text-xs font-semibold text-[#d5e4ff] hover:border-[#7094cf]"
+                      >
+                        Open TradingView
+                      </a>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={onClose}
+                    className="rounded-lg border border-[#35527f] bg-[#13243f] px-3 py-2 text-sm font-semibold text-[#c6d8f6] hover:border-[#5578ad]"
+                  >
+                    Close
+                  </button>
+                </div>
               </div>
+
+              <p className="relative mt-2 text-[11px] text-[#8ea8d1]">
+                Quick keys: <span className="text-white">Left/Right</span> to switch coin, <span className="text-white">Esc</span> to close layer.
+              </p>
             </div>
 
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 p-4 sm:p-6">
@@ -723,20 +1000,44 @@ function CoinDetailOverlay({ coin, quality, qualityApiFailed, onClose }) {
                       <p className="text-lg font-bold text-white">Market Structure</p>
                       <p className="text-xs text-[#95acd2] mt-1">Range behavior, intraday trend and execution map</p>
                     </div>
-                    <div className="inline-flex p-1 rounded-lg bg-[#111f39] border border-[#2d456f]">
-                      {CHART_INTERVALS.map((interval) => (
-                        <button
-                          key={interval}
-                          type="button"
-                          onClick={() => setChartInterval(interval)}
-                          className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${chartInterval === interval
-                            ? 'bg-[#f0b90b] text-[#1d1400]'
-                            : 'text-[#a9bfdf] hover:text-white'
-                          }`}
-                        >
-                          {interval}
-                        </button>
-                      ))}
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      <div className="inline-flex p-1 rounded-lg bg-[#111f39] border border-[#2d456f]">
+                        {CHART_INTERVALS.map((interval) => (
+                          <button
+                            key={interval}
+                            type="button"
+                            onClick={() => setChartInterval(interval)}
+                            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${chartInterval === interval
+                              ? 'bg-[#f0b90b] text-[#1d1400]'
+                              : 'text-[#a9bfdf] hover:text-white'
+                            }`}
+                          >
+                            {interval}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="inline-flex p-1 rounded-lg bg-[#111f39] border border-[#2d456f]">
+                        {CHART_VIEWS.map((view) => (
+                          <button
+                            key={view.value}
+                            type="button"
+                            onClick={() => setChartView(view.value)}
+                            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${chartView === view.value
+                              ? 'bg-[#2a77ff] text-[#eef5ff]'
+                              : 'text-[#a9bfdf] hover:text-white'
+                            }`}
+                          >
+                            {view.label}
+                          </button>
+                        ))}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setChartFullscreen(true)}
+                        className="rounded-lg border border-[#395b89] bg-[#12233f] px-3 py-2 text-xs font-semibold text-[#cfe0fd] hover:border-[#5f86bd]"
+                      >
+                        Fullscreen
+                      </button>
                     </div>
                   </div>
 
@@ -746,12 +1047,22 @@ function CoinDetailOverlay({ coin, quality, qualityApiFailed, onClose }) {
                         <div className="animate-spin rounded-full h-9 w-9 border-b-2 border-[#f0b90b]" />
                       </div>
                     ) : (
-                      <DetailChart points={chartPoints} />
+                      <DetailChart
+                        points={chartPointsToRender}
+                        mode={chartView}
+                        expanded={false}
+                        chartIdPrefix="detail-inline"
+                      />
                     )}
                   </div>
 
-                  {chartError && (
+                  {chartError && !usingFallbackChart && (
                     <p className="mt-3 text-sm text-[#ff9db0]">{chartError}</p>
+                  )}
+                  {usingFallbackChart && (
+                    <p className="mt-3 text-xs text-[#9cb5dc]">
+                      Live chart unavailable for this interval. Showing cached 7d sparkline projection.
+                    </p>
                   )}
                   {!chartError && chartUpdatedAt && (
                     <p className="mt-3 text-xs text-[#8da6ce]">
@@ -807,9 +1118,17 @@ function CoinDetailOverlay({ coin, quality, qualityApiFailed, onClose }) {
                 <div className="rounded-2xl border border-[#304870] bg-[linear-gradient(145deg,#101f39,#0f1b33)] p-4 sm:p-5">
                   <p className="cc-mono text-[11px] uppercase tracking-[0.18em] text-[#91aed8]">Deep Dive Thesis</p>
                   <p className="mt-2 text-sm leading-relaxed text-[#d7e3f8]">{researchNarrative}</p>
+                  <div className="mt-3 h-2 rounded-full border border-[#2e4b73] bg-[#13233f] overflow-hidden">
+                    <div
+                      className="h-full bg-[linear-gradient(90deg,#5fd5ff,#ffbe2e)]"
+                      style={{ width: `${fundamentalsCoveragePct}%` }}
+                    />
+                  </div>
+                  <p className="mt-1 text-[11px] text-[#90aad4]">
+                    Fundamentals coverage {fundamentalsCoveragePct}% ({coreFundamentalCount}/{coreFundamentalTotal}) | Updated {formatDateTime(chartUpdatedAt)}
+                  </p>
                   <div className="mt-4 space-y-2 text-xs text-[#9fb6da]">
                     <p>Price now: <span className="font-semibold text-white">{formatPrice(coin.current_price, 6)}</span></p>
-                    <p>Distance to ATH: <span className="font-semibold text-white">{formatSignedPercent(distanceToAthPct)}</span></p>
                     <p>Liquidity turnover: <span className="font-semibold text-white">{Number.isFinite(volumeToCapPct) ? `${volumeToCapPct.toFixed(2)}%` : 'N/A'}</span></p>
                     <p>News bias signal: <span className="font-semibold text-white">{newsBias}</span></p>
                     <p>Slippage risk: <span className="font-semibold text-white">{(!qualityApiFailed && quality?.slippageRisk) || 'N/A'}</span></p>
@@ -823,7 +1142,9 @@ function CoinDetailOverlay({ coin, quality, qualityApiFailed, onClose }) {
                       {coinNews.length} stories
                     </span>
                   </div>
-                  <p className="mt-1 text-xs text-[#90a5ca]">Latest {coin.symbol?.toUpperCase()} context to validate trend strength</p>
+                  <p className="mt-1 text-xs text-[#90a5ca]">
+                    Latest {coin.symbol?.toUpperCase()} context to validate trend strength | Feed: {newsSourceLabel}
+                  </p>
 
                   {newsLoading ? (
                     <div className="mt-4 space-y-3">
@@ -860,30 +1181,77 @@ function CoinDetailOverlay({ coin, quality, qualityApiFailed, onClose }) {
                 </div>
 
                 <div className="rounded-2xl border border-[#304870] bg-[#101f37] p-4 text-xs text-[#9ab0d3] space-y-2">
-                  <p>Order Pressure: <span className="font-semibold text-white">{formatPressure(quality, qualityApiFailed)}</span></p>
-                  <p>Spread: <span className="font-semibold text-white">{formatSpread(quality?.spreadPct)}</span></p>
-                  <p>News Bias Meter: <span className="font-semibold text-white">{newsBiasMeta.label} ({newsBiasMeta.score}/100)</span></p>
+                  <p className="cc-mono uppercase tracking-[0.14em] text-[10px] text-[#8ea8d3]">Data Snapshot</p>
+                  <p>Pair: <span className="font-semibold text-white">{displayPair}</span></p>
+                  <p>Interval: <span className="font-semibold text-white">{chartInterval}</span></p>
+                  <p>Candles: <span className="font-semibold text-white">{chartPointsToRender.length || 0}</span></p>
                   <p>Total Supply: <span className="font-semibold text-white">{formatSupply(coin.total_supply)}</span></p>
+                  <p>Max Supply: <span className="font-semibold text-white">{formatSupply(coin.max_supply)}</span></p>
                   <p>ATH: <span className="font-semibold text-white">{formatPrice(coin.ath)}</span></p>
                   <p>ATL: <span className="font-semibold text-white">{formatPrice(coin.atl)}</span></p>
+                  <p>Coin ID: <span className="font-semibold text-white">{coin.coingecko_id || 'N/A'}</span></p>
                 </div>
               </aside>
             </div>
           </section>
         </div>
       </div>
+
+      {chartFullscreen && (
+        <div className="fixed inset-0 z-[70]">
+          <button
+            type="button"
+            aria-label="Close fullscreen chart"
+            onClick={() => setChartFullscreen(false)}
+            className="absolute inset-0 bg-[#01040c]/90 backdrop-blur-md"
+          />
+          <div className="relative z-10 h-full p-3 sm:p-5 lg:p-8">
+            <section className="mx-auto flex h-full w-full max-w-[1460px] flex-col overflow-hidden rounded-3xl border border-[#35537c] bg-[linear-gradient(150deg,#08162b_0%,#0f2748_46%,#091a36_100%)] shadow-[0_45px_100px_rgba(1,4,12,0.8)]">
+              <div className="flex items-center justify-between gap-3 border-b border-[#2f4b72] px-4 py-3 sm:px-6">
+                <div className="min-w-0">
+                  <p className="cc-mono text-[11px] uppercase tracking-[0.16em] text-[#91abd4]">Expanded Chart View</p>
+                  <p className="text-sm text-[#d5e3fb] truncate">
+                    {displayPair} | {chartInterval} | {chartView === 'candles' ? 'Candles' : 'Line'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setChartFullscreen(false)}
+                  className="rounded-lg border border-[#416798] bg-[#122845] px-3 py-2 text-sm font-semibold text-[#d6e6ff] hover:border-[#6f95c7]"
+                >
+                  Close Fullscreen
+                </button>
+              </div>
+
+              <div className="flex-1 p-3 sm:p-5">
+                {chartLoading ? (
+                  <div className="h-full rounded-2xl border border-[#2b4268] bg-[#0b172e] flex items-center justify-center">
+                    <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-[#f0b90b]" />
+                  </div>
+                ) : (
+                  <DetailChart
+                    points={chartPointsToRender}
+                    mode={chartView}
+                    expanded
+                    chartIdPrefix="detail-fullscreen"
+                  />
+                )}
+              </div>
+            </section>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
 const Market = ({ market, loading, qualityBySymbol = {}, qualityApiFailed = false }) => {
-  const [visibleCount, setVisibleCount] = useState(MARKET_RENDER_CHUNK)
+  const [visibleStep, setVisibleStep] = useState(1)
   const [selectedCoinKey, setSelectedCoinKey] = useState(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [marketPreset, setMarketPreset] = useState('balanced')
   const [sourceFilter, setSourceFilter] = useState('all')
   const activePreset = MARKET_PRESETS[marketPreset] || MARKET_PRESETS.balanced
-  const browseStateKey = `${marketPreset}|${sourceFilter}|${searchQuery.trim().toLowerCase()}`
   const sourceOptions = useMemo(() => {
     const sources = [...new Set(
       market
@@ -960,20 +1328,62 @@ const Market = ({ market, loading, qualityBySymbol = {}, qualityApiFailed = fals
 
     return list.sort((a, b) => (Number(b.total_volume) || 0) - (Number(a.total_volume) || 0))
   }, [activePreset.sort, filteredMarket])
+  const quickMarketStats = useMemo(() => {
+    const valid = filteredMarket.filter((coin) => Number.isFinite(Number(coin.price_change_percentage_24h)))
+    if (valid.length === 0) {
+      return {
+        gainers: 0,
+        losers: 0,
+        averageMove: null,
+        totalVolume: null,
+        topGainer: null,
+        topLoser: null,
+      }
+    }
 
-  useEffect(() => {
-    setVisibleCount(MARKET_RENDER_CHUNK)
-  }, [browseStateKey])
+    let gainers = 0
+    let losers = 0
+    let totalMove = 0
+    let totalVolume = 0
+    let topGainer = null
+    let topLoser = null
 
-  useEffect(() => {
-    setVisibleCount((current) => {
-      if (sortedMarket.length === 0) return 0
-      if (current > sortedMarket.length) return sortedMarket.length
-      if (current < MARKET_RENDER_CHUNK) return Math.min(MARKET_RENDER_CHUNK, sortedMarket.length)
-      return current
+    valid.forEach((coin) => {
+      const change = Number(coin.price_change_percentage_24h)
+      const volume = Number(coin.total_volume)
+
+      totalMove += change
+      if (Number.isFinite(volume) && volume > 0) totalVolume += volume
+      if (change > 0) gainers += 1
+      if (change < 0) losers += 1
+
+      if (!topGainer || change > Number(topGainer.price_change_percentage_24h)) {
+        topGainer = coin
+      }
+      if (!topLoser || change < Number(topLoser.price_change_percentage_24h)) {
+        topLoser = coin
+      }
     })
-  }, [sortedMarket.length])
 
+    return {
+      gainers,
+      losers,
+      averageMove: totalMove / valid.length,
+      totalVolume: totalVolume > 0 ? totalVolume : null,
+      topGainer,
+      topLoser,
+    }
+  }, [filteredMarket])
+  const snapshotLabel = new Date().toLocaleTimeString()
+  const hasActiveFilters = marketPreset !== 'balanced'
+    || effectiveSourceFilter !== 'all'
+    || searchQuery.trim().length > 0
+
+  const visibleCount = useMemo(() => {
+    if (sortedMarket.length === 0) return 0
+    const targetCount = Math.max(MARKET_RENDER_CHUNK, visibleStep * MARKET_RENDER_CHUNK)
+    return Math.min(sortedMarket.length, targetCount)
+  }, [sortedMarket.length, visibleStep])
   const visibleMarket = useMemo(() => sortedMarket.slice(0, visibleCount), [sortedMarket, visibleCount])
   const hasMoreCoins = visibleCount < sortedMarket.length
   const browseProgress = sortedMarket.length > 0
@@ -982,8 +1392,18 @@ const Market = ({ market, loading, qualityBySymbol = {}, qualityApiFailed = fals
 
   const selectedCoin = useMemo(() => {
     if (!selectedCoinKey) return null
-    return market.find((coin) => (coin.id || coin.symbol) === selectedCoinKey) || null
-  }, [market, selectedCoinKey])
+    return sortedMarket.find((coin) => (coin.id || coin.symbol) === selectedCoinKey)
+      || market.find((coin) => (coin.id || coin.symbol) === selectedCoinKey)
+      || null
+  }, [market, selectedCoinKey, sortedMarket])
+  const selectedCoinIndex = useMemo(() => {
+    if (!selectedCoinKey) return -1
+    return sortedMarket.findIndex((coin) => (coin.id || coin.symbol) === selectedCoinKey)
+  }, [selectedCoinKey, sortedMarket])
+  const hasPrevCoin = selectedCoinIndex > 0
+  const hasNextCoin = selectedCoinIndex >= 0 && selectedCoinIndex < (sortedMarket.length - 1)
+  const prevCoinSymbol = hasPrevCoin ? sortedMarket[selectedCoinIndex - 1]?.symbol?.toUpperCase() : ''
+  const nextCoinSymbol = hasNextCoin ? sortedMarket[selectedCoinIndex + 1]?.symbol?.toUpperCase() : ''
 
   const selectedQuality = useMemo(() => {
     if (!selectedCoin?.symbol) return null
@@ -993,6 +1413,23 @@ const Market = ({ market, loading, qualityBySymbol = {}, qualityApiFailed = fals
 
   const handleCoinSelect = (coin) => {
     setSelectedCoinKey(coin.id || coin.symbol || null)
+  }
+  const handlePrevCoinSelect = () => {
+    if (!hasPrevCoin) return
+    const previousCoin = sortedMarket[selectedCoinIndex - 1]
+    setSelectedCoinKey(previousCoin?.id || previousCoin?.symbol || null)
+  }
+  const handleNextCoinSelect = () => {
+    if (!hasNextCoin) return
+    const nextCoin = sortedMarket[selectedCoinIndex + 1]
+    setSelectedCoinKey(nextCoin?.id || nextCoin?.symbol || null)
+  }
+
+  const handleResetFilters = () => {
+    setSearchQuery('')
+    setSourceFilter('all')
+    setMarketPreset('balanced')
+    setVisibleStep(1)
   }
 
   if (loading) {
@@ -1051,7 +1488,10 @@ const Market = ({ market, loading, qualityBySymbol = {}, qualityApiFailed = fals
             </label>
             <input
               value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
+              onChange={(event) => {
+                setSearchQuery(event.target.value)
+                setVisibleStep(1)
+              }}
               placeholder="Type BTC, ETH, SOL or full coin name..."
               className="w-full rounded-xl border border-[#40608f] bg-[#0b162a] px-4 py-3 text-sm text-[#e3ebfa] placeholder-[#809ac3] outline-none focus:border-[#ffbe2e]"
             />
@@ -1063,7 +1503,10 @@ const Market = ({ market, loading, qualityBySymbol = {}, qualityApiFailed = fals
             </label>
             <select
               value={effectiveSourceFilter}
-              onChange={(event) => setSourceFilter(event.target.value)}
+              onChange={(event) => {
+                setSourceFilter(event.target.value)
+                setVisibleStep(1)
+              }}
               className="w-full rounded-xl border border-[#40608f] bg-[#0b162a] px-3 py-3 text-sm text-[#dce8fb] outline-none focus:border-[#ffbe2e]"
             >
               {sourceOptions.map((option) => (
@@ -1073,6 +1516,21 @@ const Market = ({ market, loading, qualityBySymbol = {}, qualityApiFailed = fals
               ))}
             </select>
           </div>
+
+          <div className="w-full lg:w-auto">
+            <button
+              type="button"
+              onClick={handleResetFilters}
+              disabled={!hasActiveFilters}
+              className={`w-full lg:w-auto rounded-xl border px-4 py-3 text-sm font-semibold transition-colors ${
+                hasActiveFilters
+                  ? 'border-[#5d7fae] bg-[#12243f] text-[#d7e7ff] hover:border-[#7ea2d0]'
+                  : 'border-[#2c4467] bg-[#101b31] text-[#6c87af] cursor-not-allowed'
+              }`}
+            >
+              Reset Filters
+            </button>
+          </div>
         </div>
 
         <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2">
@@ -1080,7 +1538,10 @@ const Market = ({ market, loading, qualityBySymbol = {}, qualityApiFailed = fals
             <button
               key={key}
               type="button"
-              onClick={() => setMarketPreset(key)}
+              onClick={() => {
+                setMarketPreset(key)
+                setVisibleStep(1)
+              }}
               className={`text-left rounded-xl border p-3 transition-all ${marketPreset === key
                 ? 'border-[#ffbe2e] bg-[linear-gradient(140deg,#33270f,#2e2410)] shadow-[0_12px_24px_rgba(255,190,46,0.16)]'
                 : 'border-[#35527f] bg-[#12203a] hover:border-[#5377ac] hover:-translate-y-0.5'
@@ -1095,6 +1556,70 @@ const Market = ({ market, loading, qualityBySymbol = {}, qualityApiFailed = fals
         <p className="mt-3 text-xs text-[#91acd2]">
           Active mode: <span className="text-[#ffd782] font-semibold">{activePreset.label}</span> | Showing {visibleMarket.length} of {sortedMarket.length} filtered coins ({market.length} total live tracked)
         </p>
+
+        {hasActiveFilters && (
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="cc-mono rounded-full border border-[#3a5d8a] bg-[#132744] px-2.5 py-1 text-[#b9d2f6]">
+              Preset: {activePreset.label}
+            </span>
+            {effectiveSourceFilter !== 'all' && (
+              <span className="cc-mono rounded-full border border-[#3a5d8a] bg-[#132744] px-2.5 py-1 text-[#b9d2f6]">
+                Source: {sourceOptions.find((option) => option.value === effectiveSourceFilter)?.label}
+              </span>
+            )}
+            {searchQuery.trim() && (
+              <span className="cc-mono rounded-full border border-[#3a5d8a] bg-[#132744] px-2.5 py-1 text-[#b9d2f6]">
+                Query: "{searchQuery.trim()}"
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="mb-6 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+        <div className="rounded-2xl border border-[#314f76] bg-[linear-gradient(150deg,#0d1f38,#102540)] p-3">
+          <p className="text-[11px] uppercase tracking-[0.14em] text-[#8fb0dc]">Breadth</p>
+          <p className="mt-1 text-sm text-white font-semibold">
+            {quickMarketStats.gainers} Gainers / {quickMarketStats.losers} Losers
+          </p>
+          <p className="mt-1 text-xs text-[#9fb7dc]">
+            Volume {formatCompactUsd(quickMarketStats.totalVolume)}
+          </p>
+        </div>
+        <div className="rounded-2xl border border-[#314f76] bg-[linear-gradient(150deg,#0d1f38,#102540)] p-3">
+          <p className="text-[11px] uppercase tracking-[0.14em] text-[#8fb0dc]">Average 24h Move</p>
+          <p className="mt-1 text-sm text-white font-semibold">{formatSignedPercent(quickMarketStats.averageMove)}</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => quickMarketStats.topGainer && handleCoinSelect(quickMarketStats.topGainer)}
+          disabled={!quickMarketStats.topGainer}
+          className={`text-left rounded-2xl border p-3 transition-colors ${
+            quickMarketStats.topGainer
+              ? 'border-[#2f6f57] bg-[linear-gradient(150deg,#112d24,#143428)] hover:border-[#4b9778]'
+              : 'border-[#314f76] bg-[linear-gradient(150deg,#0d1f38,#102540)]'
+          }`}
+        >
+          <p className="text-[11px] uppercase tracking-[0.14em] text-[#8fb0dc]">Top Gainer</p>
+          <p className="mt-1 text-sm text-white font-semibold">
+            {quickMarketStats.topGainer ? `${quickMarketStats.topGainer.symbol?.toUpperCase()} ${formatSignedPercent(Number(quickMarketStats.topGainer.price_change_percentage_24h))}` : 'N/A'}
+          </p>
+        </button>
+        <button
+          type="button"
+          onClick={() => quickMarketStats.topLoser && handleCoinSelect(quickMarketStats.topLoser)}
+          disabled={!quickMarketStats.topLoser}
+          className={`text-left rounded-2xl border p-3 transition-colors ${
+            quickMarketStats.topLoser
+              ? 'border-[#6f3345] bg-[linear-gradient(150deg,#2d1620,#371a28)] hover:border-[#9c4a62]'
+              : 'border-[#314f76] bg-[linear-gradient(150deg,#0d1f38,#102540)]'
+          }`}
+        >
+          <p className="text-[11px] uppercase tracking-[0.14em] text-[#8fb0dc]">Top Loser</p>
+          <p className="mt-1 text-sm text-white font-semibold">
+            {quickMarketStats.topLoser ? `${quickMarketStats.topLoser.symbol?.toUpperCase()} ${formatSignedPercent(Number(quickMarketStats.topLoser.price_change_percentage_24h))}` : 'N/A'}
+          </p>
+        </button>
       </div>
 
       {sortedMarket.length === 0 ? (
@@ -1147,14 +1672,14 @@ const Market = ({ market, loading, qualityBySymbol = {}, qualityApiFailed = fals
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => setVisibleCount((current) => Math.min(current + MARKET_RENDER_CHUNK, sortedMarket.length))}
+                    onClick={() => setVisibleStep((current) => current + 1)}
                     className="rounded-xl border border-[#3d5d89] bg-[#122643] px-4 py-2 text-sm font-semibold text-[#dce9ff] hover:border-[#638bbb]"
                   >
                     Load Next {Math.min(MARKET_RENDER_CHUNK, sortedMarket.length - visibleCount)}
                   </button>
                   <button
                     type="button"
-                    onClick={() => setVisibleCount(sortedMarket.length)}
+                    onClick={() => setVisibleStep(Math.ceil(sortedMarket.length / MARKET_RENDER_CHUNK))}
                     className="rounded-xl border border-[#6d5927] bg-[#31270f] px-4 py-2 text-sm font-semibold text-[#ffd98b] hover:border-[#a48435]"
                   >
                     Expand All
@@ -1170,7 +1695,7 @@ const Market = ({ market, loading, qualityBySymbol = {}, qualityApiFailed = fals
         <div className="flex flex-wrap items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-[#ffbe2e] animate-pulse"></span>
           <p className="text-sm text-[#c4d2ea] cc-mono">
-            Auto-refresh active | Snapshot {new Date().toLocaleTimeString()}
+            Auto-refresh active | Snapshot {snapshotLabel}
           </p>
         </div>
       </div>
@@ -1180,6 +1705,12 @@ const Market = ({ market, loading, qualityBySymbol = {}, qualityApiFailed = fals
           coin={selectedCoin}
           quality={selectedQuality}
           qualityApiFailed={qualityApiFailed}
+          onPrevCoin={handlePrevCoinSelect}
+          onNextCoin={handleNextCoinSelect}
+          hasPrevCoin={hasPrevCoin}
+          hasNextCoin={hasNextCoin}
+          prevCoinSymbol={prevCoinSymbol}
+          nextCoinSymbol={nextCoinSymbol}
           onClose={() => setSelectedCoinKey(null)}
         />
       )}

@@ -38,6 +38,38 @@ function analyzeSignal(signal) {
     message.push('BTC against trade');
   }
 
+  // RSI-based scoring
+  if (signal.rsi !== undefined) {
+    if (signal.type === 'BUY' && signal.rsi >= 30 && signal.rsi <= 50) {
+      score += 8;
+      message.push('RSI in BUY zone');
+    } else if (signal.type === 'SELL' && signal.rsi >= 50 && signal.rsi <= 70) {
+      score += 8;
+      message.push('RSI in SELL zone');
+    } else if ((signal.type === 'BUY' && signal.rsi > 70) || (signal.type === 'SELL' && signal.rsi < 30)) {
+      score -= 10;
+      message.push('RSI against trade');
+    }
+  }
+
+  // Confidence-based scoring
+  if (signal.confidence >= 80) {
+    score += 8;
+    message.push('High confidence signal');
+  } else if (signal.confidence < 65) {
+    score -= 5;
+    message.push('Low confidence');
+  }
+
+  // Trigger quality bonus
+  if (signal.trigger === 'VOLATILITY_BREAKOUT') {
+    score += 5;
+    message.push('Breakout trigger');
+  } else if (signal.trigger === 'CROSSOVER') {
+    score += 5;
+    message.push('EMA crossover');
+  }
+
   // FINAL DECISION based on score
   let decision = 'REJECT';
   if (score >= 75) decision = 'STRONG_APPROVE';

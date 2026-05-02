@@ -1,7 +1,24 @@
 import axios from "axios";
 
+const configuredBaseUrl = String(import.meta.env.VITE_API_BASE_URL || "").trim();
+const baseURL = configuredBaseUrl || "http://localhost:5000/api";
+const writeApiKey = String(import.meta.env.VITE_SIGNAL_WRITE_API_KEY || "").trim();
+
 const api = axios.create({
-  baseURL: "http://localhost:5000/api",
+  baseURL,
+});
+
+api.interceptors.request.use((config) => {
+  if (writeApiKey) {
+    const method = String(config.method || "get").toLowerCase();
+    if (method !== "get" && method !== "head" && method !== "options") {
+      config.headers = {
+        ...config.headers,
+        "x-api-key": writeApiKey,
+      };
+    }
+  }
+  return config;
 });
 
 export const getSignals = () => api.get("/signals");
