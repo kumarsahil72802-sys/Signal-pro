@@ -6,6 +6,7 @@ const { saveTradeSnapshot } = require('./tradeService');
 const Signal = require('../models/Signal');
 const SystemConfig = require('../models/SystemConfig');
 const { enhancedAnalyze } = require('./aiAnalyst');
+const { askGroq } = require('./groqService');
 
 // ============================================================================
 // CONFIGURATION
@@ -252,48 +253,15 @@ function countKeywordHits(text, keywords) {
  */
 async function calcNewsSentiment(symbol) {
   try {
-    const normalized = String(symbol || '').trim().toUpperCase();
-    if (!normalized) return 0;
-
-    const baseSymbol = normalized.endsWith('USDT')
-      ? normalized.slice(0, -4)
-      : normalized;
-    if (!baseSymbol) return 0;
-
-    const articles = await getNews(baseSymbol, 10);
-
-    if (!Array.isArray(articles) || articles.length === 0) {
-      return 0;
-    }
-
-    const recentArticles = articles.slice(0, 10);
-    let aggregateScore = 0;
-    let scoredArticles = 0;
-
-    for (const article of recentArticles) {
-      const headline = String(article?.title || '');
-      const summary = String(article?.summary || article?.body || '');
-      const text = `${headline} ${summary}`.toLowerCase();
-      if (!text.trim()) continue;
-
-      const bullishHits = countKeywordHits(text, BULLISH_NEWS_KEYWORDS);
-      const bearishHits = countKeywordHits(text, BEARISH_NEWS_KEYWORDS);
-      const totalHits = bullishHits + bearishHits;
-      if (totalHits === 0) continue;
-
-      aggregateScore += (bullishHits - bearishHits) / totalHits;
-      scoredArticles += 1;
-    }
-
-    if (scoredArticles === 0) {
-      return 0;
-    }
-
-    const score = aggregateScore / scoredArticles;
-    return Math.max(-1, Math.min(1, Number(score.toFixed(3))));
-  } catch (error) {
-    return 0;
-  }
+    const baseSymbol = symbol.replace('USDT', '');
+    const articles = await getNews(baseSymbol, 5);
+    if (!articles || articles.length === 0) return 0;
+    const headlines = articles.map(a => a.title).filter(Boolean).slice(0, 5).join('\n');
+    const prompt = `Crypto sentiment analyzer. Headlines for ${baseSymbol}:\n${headlines}\n\nReply ONLY with a number -1.0 to 1.0. No explanation.`;
+    const result = await askGroq(prompt, '0');
+    const score = parseFloat(result);
+    return isNaN(score) ? 0 : Math.max(-1, Math.min(1, score));
+  } catch (e) { return 0; }
 }
 
 /**
@@ -1334,19 +1302,25 @@ function calcRSIScore(rsi, trend) {
  * @param {string} trend - 'BUY' or 'SELL'
  * @returns {number} MACD score
  */
-function calcMACDScore(macdData, trend) {
+function getMACDHistogramPercent(macdData, currentPrice) {
+  if (!macdData || !Number.isFinite(macdData.histogram)) return 0;
+  if (!Number.isFinite(currentPrice) || currentPrice <= 0) return 0;
+  return (macdData.histogram / currentPrice) * 100;
+}
+
+function calcMACDScore(macdData, trend, currentPrice) {
   if (!macdData) return 5;
   
-  const histogram = macdData.histogram;
-  const isBullish = histogram > 0;
-  const isBearish = histogram < 0;
-  const histStrength = Math.abs(histogram);
+  const histogramPct = getMACDHistogramPercent(macdData, currentPrice);
+  const isBullish = histogramPct > 0;
+  const isBearish = histogramPct < 0;
+  const histStrength = Math.abs(histogramPct);
   
   if (trend === 'BUY' && isBullish) {
-    return histStrength > 5 ? 15 : 10;
+    return histStrength >= 0.12 ? 15 : 10;
   }
   if (trend === 'SELL' && isBearish) {
-    return histStrength > 5 ? 15 : 10;
+    return histStrength >= 0.12 ? 15 : 10;
   }
   return 5;
 }
@@ -1589,7 +1563,7 @@ function calcTechnicalScore(params) {
   const trend = advancedSignal?.trend;
 
   const rsiScore = calcRSIScore(rsi, trend);
-  const macdScore = calcMACDScore(macdData, trend);
+  const macdScore = calcMACDScore(macdData, trend, currentPrice);
   const trendScore = calcTrendScore(advancedSignal, momentum);
   const volumeScore = calcVolumeScore(volumeData, volumeDelta, trend);
   const bbScore = calcBBScore(bbWidthPercent, bbExpanding);
@@ -1645,16 +1619,16 @@ function getRSIStrengthLevel(rsi) {
  * @param {string} trend - 'BUY' or 'SELL'
  * @returns {string} 'strong', 'moderate', or 'weak'
  */
-function getMACDStrengthLevel(macdData, trend) {
+function getMACDStrengthLevel(macdData, trend, currentPrice) {
   if (!macdData) return 'weak';
 
-  const histogram = macdData.histogram;
-  const isBullish = histogram > 0;
-  const isBearish = histogram < 0;
-  const histStrength = Math.abs(histogram);
+  const histogramPct = getMACDHistogramPercent(macdData, currentPrice);
+  const isBullish = histogramPct > 0;
+  const isBearish = histogramPct < 0;
+  const histStrength = Math.abs(histogramPct);
 
-  if (trend === 'BUY' && isBullish) return histStrength > 5 ? 'strong' : 'moderate';
-  if (trend === 'SELL' && isBearish) return histStrength > 5 ? 'strong' : 'moderate';
+  if (trend === 'BUY' && isBullish) return histStrength >= 0.12 ? 'strong' : 'moderate';
+  if (trend === 'SELL' && isBearish) return histStrength >= 0.12 ? 'strong' : 'moderate';
   return 'weak';
 }
 
@@ -1682,10 +1656,11 @@ function calcMultiTimeframeBoost(trend, higherTrend) {
  * @param {string} trend - 'BUY' or 'SELL'
  * @returns {number} Boost score
  */
-function calcMACDStrengthBoost(macdData, trend) {
+function calcMACDStrengthBoost(macdData, trend, currentPrice) {
   if (!macdData) return 0;
-  const histStrength = Math.abs(macdData.histogram);
-  if (histStrength > 10) return 5;
+  const histogramPct = getMACDHistogramPercent(macdData, currentPrice);
+  const aligned = (trend === 'BUY' && histogramPct > 0) || (trend === 'SELL' && histogramPct < 0);
+  if (aligned && Math.abs(histogramPct) >= 0.18) return 5;
   return 0;
 }
 
@@ -1721,12 +1696,21 @@ function calcBollingerExpansionBoost(bbExpanding) {
  * @returns {number} Total boost score
  */
 function calcConfidenceBoost(params) {
-  const { trendData, higherTrend, macdData, rsi, rsiHistory, bbExpanding } = params;
+  const { trendData, higherTrend, macdData, rsi, rsiHistory, bbExpanding, currentPrice } = params;
   const mtBoost = calcMultiTimeframeBoost(trendData?.trend, higherTrend);
-  const macdBoost = calcMACDStrengthBoost(macdData, trendData?.trend);
+  const macdBoost = calcMACDStrengthBoost(macdData, trendData?.trend, currentPrice);
   const rsiBoost = calcRSIMomentumBoost(rsi, rsiHistory, trendData?.trend);
   const bbBoost = calcBollingerExpansionBoost(bbExpanding);
   return mtBoost + macdBoost + rsiBoost + bbBoost;
+}
+
+function hasStrongIndicatorConflict({ trend, macdData, currentPrice, shortTermMomentum, midTermMomentum, volumeDelta }) {
+  const histogramPct = getMACDHistogramPercent(macdData, currentPrice);
+  const macdOpposite = (trend === 'BUY' && histogramPct < -0.05) || (trend === 'SELL' && histogramPct > 0.05);
+  const momentumOpposite = (trend === 'BUY' && shortTermMomentum < -0.25 && midTermMomentum < -0.15) ||
+    (trend === 'SELL' && shortTermMomentum > 0.25 && midTermMomentum > 0.15);
+  const volumeOpposite = (trend === 'BUY' && volumeDelta.sellDominant) || (trend === 'SELL' && volumeDelta.buyDominant);
+  return macdOpposite && momentumOpposite && volumeOpposite;
 }
 
 // ============================================================================
@@ -2171,7 +2155,8 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
     macdData,
     rsi,
     rsiHistory,
-    bbExpanding
+    bbExpanding,
+    currentPrice
   });
 
   const confidencePenalty = calcConfidencePenalty({
@@ -2192,10 +2177,22 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
     volumeDeltaPenalty = -8;
   }
 
+  if (hasStrongIndicatorConflict({
+    trend,
+    macdData,
+    currentPrice,
+    shortTermMomentum,
+    midTermMomentum,
+    volumeDelta
+  })) {
+    console.log(`[ENGINE] ${coin} BLOCKED -> Strong indicator conflict (MACD + momentum + volume against ${trend})`);
+    return null;
+  }
+
   // Apply weak indicator penalty (reduce confidence, don't reject)
   const indicatorStrengths = {
     rsi: getRSIStrengthLevel(rsi),
-    macd: getMACDStrengthLevel(macdData, trend),
+    macd: getMACDStrengthLevel(macdData, trend, currentPrice),
     momentum: getMomentumStrengthLevel(shortTermMomentum, midTermMomentum, trend),
     volume: getVolumeStrengthLevel(volumeData),
     trend: getTrendStrengthLevel(advancedSignal, currentPrice)
@@ -2249,8 +2246,7 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
       if (fourHTrend === 'bearish' && fourHStrength === 'moderate') {
         // BLOCK: Moderate bearish 4H opposes BUY
         console.log(`[ENGINE] ${coin} BLOCKED → Signal blocked: 4H moderate bearish trend opposes 1H BUY | 4H:${fourHTrend} ${fourHStrength} slope:${fourHSlope.toFixed(3)}%`);
-        fourHPenalty = -20;
-        confidence = Math.max(0, confidence + fourHPenalty);
+        return null;
       }
       if (fourHTrend === 'bearish' && fourHStrength === 'weak') {
         // DO NOT BLOCK: Weak bearish - apply -15 confidence penalty instead
@@ -2271,8 +2267,7 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
       if (fourHTrend === 'bullish' && fourHStrength === 'moderate') {
         // BLOCK: Moderate bullish 4H opposes SELL
         console.log(`[ENGINE] ${coin} BLOCKED → Signal blocked: 4H moderate bullish trend opposes 1H SELL | 4H:${fourHTrend} ${fourHStrength} slope:${fourHSlope.toFixed(3)}%`);
-        fourHPenalty = -20;
-        confidence = Math.max(0, confidence + fourHPenalty);
+        return null;
       }
       if (fourHTrend === 'bullish' && fourHStrength === 'weak') {
         // DO NOT BLOCK: Weak bullish - apply -15 confidence penalty instead
@@ -2385,9 +2380,10 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   signalData.aiScore = adjustedSignal.aiScore;
   signalData.aiDecision = adjustedSignal.aiDecision;
   signalData.aiMessage = adjustedSignal.aiMessage;
+  signalData.groqInsight = adjustedSignal.groqInsight ?? '';
 
-  const signal = new Signal(signalData);
-  await signal.save();
+  const savedSignal = new Signal(signalData);
+  await savedSignal.save();
 
   try {
     await saveTradeSnapshot({
@@ -2405,12 +2401,22 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
     console.error(`[TradeSnapshot] Failed to save snapshot: ${error.message}`);
   }
 
+  try {
+    const explanationPrompt = `Explain this crypto signal in 2-3 simple sentences for a beginner - why generated, what to watch, key risk:
+Coin: ${savedSignal.coin}, Type: ${savedSignal.type}, Entry: ${savedSignal.entryPrice}, Target: ${savedSignal.target}, Stop Loss: ${savedSignal.stopLoss}, Confidence: ${savedSignal.confidence}%, Trigger: ${savedSignal.trigger}`;
+    const explanation = await askGroq(explanationPrompt, '');
+    if (explanation) {
+      await Signal.findByIdAndUpdate(savedSignal._id, { explanation });
+      savedSignal.explanation = explanation;
+    }
+  } catch (e) { console.error('[Groq] Explanation failed:', e.message); }
+
   // Record cooldown timestamp
   lastSignalTimes.set(coin, Date.now());
 
-  console.log(`[ENGINE] ${coin} SIGNAL CREATED → id:${signal._id} | trigger:${trigger} | ai:${signalData.aiDecision} (${signalData.aiScore})`);
+  console.log(`[ENGINE] ${coin} SIGNAL CREATED → id:${savedSignal._id} | trigger:${trigger} | ai:${signalData.aiDecision} (${signalData.aiScore})`);
 
-  return signal;
+  return savedSignal;
 
 }
 

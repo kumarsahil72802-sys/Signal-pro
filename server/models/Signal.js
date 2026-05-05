@@ -32,7 +32,9 @@ const signalSchema = new mongoose.Schema({
     sentiment: { type: String, default: 'NEUTRAL' },
     rsiValue: { type: Number },
     deltaRatio: { type: String },
-    volumeConfirmed: { type: String, default: 'NEUTRAL' }
+    volumeConfirmed: { type: String, default: 'NEUTRAL' },
+    execution: { type: String, default: '' },
+    slippageRisk: { type: String, default: '' }
   },
   trigger: {
     type: String,
@@ -48,6 +50,8 @@ const signalSchema = new mongoose.Schema({
     default: null
   },
   aiMessage: { type: String, default: null },
+  groqInsight: { type: String, default: '' },
+  explanation: { type: String, default: null },
   status: {
     type: String,
     enum: ['ACTIVE', 'TAKEN', 'MISSED', 'CLOSED'],

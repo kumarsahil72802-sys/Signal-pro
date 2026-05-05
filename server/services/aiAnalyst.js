@@ -1,4 +1,5 @@
 const { analyzePerformance } = require('./aiLearning');
+const { askGroq } = require('./groqService');
 
 /**
  * AI Analyst Layer for signal evaluation and decision making.
@@ -91,23 +92,52 @@ async function enhancedAnalyze(signal) {
   const perf = await analyzePerformance();
   if (!perf) return analyzed;
 
-  const trigger = analyzed.trigger;
-  const triggerPerf = perf.triggerStats[trigger];
+  const trigger = String(analyzed.trigger || 'UNKNOWN').toUpperCase();
+  const symbol = String(analyzed.coin || '').toUpperCase();
+  const triggerPerf = perf.triggerStats?.[trigger];
 
   if (triggerPerf) {
-    const triggerWinRate = Math.round((triggerPerf.win / (triggerPerf.win + triggerPerf.loss)) * 100);
+    const triggerTotal = triggerPerf.win + triggerPerf.loss;
+    const triggerWinRate = triggerTotal > 0
+      ? Math.round((triggerPerf.win / triggerTotal) * 100)
+      : 0;
 
-    if (triggerWinRate < 40) {
+    if (triggerTotal >= 8 && triggerWinRate < 40) {
       analyzed.aiScore = Math.max(0, analyzed.aiScore - 10);
       analyzed.aiMessage += ' | Low win trigger';
       if (analyzed.aiScore < 50) {
         analyzed.aiDecision = 'REJECT';
       }
-    } else if (triggerWinRate > 65) {
+    } else if (triggerTotal >= 8 && triggerWinRate > 65) {
       analyzed.aiScore = Math.min(100, analyzed.aiScore + 10);
       analyzed.aiMessage += ' | High win trigger';
     }
   }
+
+  const symbolPerf = perf.triggerSymbolStats?.[trigger]?.[symbol];
+  if (symbolPerf) {
+    const symbolTotal = symbolPerf.win + symbolPerf.loss;
+    const symbolWinRate = symbolTotal > 0
+      ? Math.round((symbolPerf.win / symbolTotal) * 100)
+      : 0;
+
+    if (symbolTotal >= 6 && symbolWinRate < 40) {
+      analyzed.aiScore = Math.max(0, analyzed.aiScore - 8);
+      analyzed.aiMessage += ' | Coin-trigger mismatch';
+      if (analyzed.aiScore < 50) {
+        analyzed.aiDecision = 'REJECT';
+      }
+    } else if (symbolTotal >= 6 && symbolWinRate > 68) {
+      analyzed.aiScore = Math.min(100, analyzed.aiScore + 6);
+      analyzed.aiMessage += ' | Coin-trigger edge';
+    }
+  }
+
+  try {
+    const prompt = `You are a crypto trading analyst. Evaluate this signal in 2 sentences max - is it a good setup and what is the main risk?
+Coin: ${analyzed.coin}, Type: ${analyzed.type}, Confidence: ${analyzed.confidence}%, Trigger: ${analyzed.trigger}, RSI: ${analyzed.rsi ?? 'N/A'}, BTC Trend: ${analyzed.btcTrend ?? 'N/A'}, Volume Spike: ${analyzed.volumeSpike ? 'Yes' : 'No'}, AI Score: ${analyzed.aiScore}/100`;
+    analyzed.groqInsight = await askGroq(prompt, 'No AI insight available.');
+  } catch (e) { analyzed.groqInsight = 'No AI insight available.'; }
 
   return analyzed;
 }

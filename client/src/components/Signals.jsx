@@ -395,6 +395,24 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, onMis
             <p>News: <span className="font-semibold text-white">{reason.sentiment || 'N/A'}</span></p>
           </div>
 
+          {signal.explanation && (
+            <div className="mb-4 p-4 bg-[#0f1e35] border border-[#1e3a5f] rounded-xl">
+              <p className="text-xs text-[#8ea2c4] uppercase tracking-wider mb-2 font-semibold flex items-center gap-2">
+                <span className="text-[#f0b90b]">⚡</span> AI Signal Explanation
+              </p>
+              <p className="text-sm text-[#c8d8f0] leading-relaxed">{signal.explanation}</p>
+            </div>
+          )}
+
+          {signal.groqInsight && (
+            <div className="mb-4 p-4 bg-[#0f1e35] border border-[#2a1e5f] rounded-xl">
+              <p className="text-xs text-[#8ea2c4] uppercase tracking-wider mb-2 font-semibold flex items-center gap-2">
+                <span className="text-[#a78bfa]">🤖</span> AI Risk Assessment
+              </p>
+              <p className="text-sm text-[#c8d8f0] leading-relaxed">{signal.groqInsight}</p>
+            </div>
+          )}
+
           {signal.createdAt && (
             <div className="mb-4 flex items-center gap-4 text-sm text-[#8ea2c4]">
               <span>Generated: {new Date(signal.createdAt).toLocaleString()}</span>
