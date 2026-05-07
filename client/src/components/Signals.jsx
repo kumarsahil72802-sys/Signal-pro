@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { getMarketChart } from '../services/api'
+import ConfidenceComparison from './confidence/ConfidenceComparison'
 
 const CHART_INTERVAL_OPTIONS = ['5m', '15m', '1h', '4h']
 const CHART_LIMIT_BY_INTERVAL = {
@@ -7,6 +8,44 @@ const CHART_LIMIT_BY_INTERVAL = {
   '15m': 96,
   '1h': 120,
   '4h': 120
+}
+const DEFAULT_SIGNAL_VALIDITY_HOURS = 8
+const DEFAULT_SIGNAL_VALIDITY_MS = DEFAULT_SIGNAL_VALIDITY_HOURS * 60 * 60 * 1000
+
+const getExpiryTimestamp = (signal) => {
+  if (!signal) return null
+  if ((signal.status === 'ACTIVE' || signal.status === 'TAKEN') && signal.validUntil) {
+    const ts = new Date(signal.validUntil).getTime()
+    return Number.isFinite(ts) ? ts : null
+  }
+  if ((signal.status === 'ACTIVE' || signal.status === 'TAKEN') && signal.createdAt) {
+    const createdTs = new Date(signal.createdAt).getTime()
+    if (Number.isFinite(createdTs)) return createdTs + DEFAULT_SIGNAL_VALIDITY_MS
+  }
+  if (signal.expireAt && (signal.result === 'TARGET_HIT' || signal.result === 'SL_HIT' || signal.result === 'EXPIRED')) {
+    const ts = new Date(signal.expireAt).getTime()
+    return Number.isFinite(ts) ? ts : null
+  }
+  return null
+}
+
+const formatCountdown = (diffMs) => {
+  if (diffMs <= 0) return 'Expired'
+  const totalMinutes = Math.floor(diffMs / (1000 * 60))
+  const days = Math.floor(totalMinutes / (60 * 24))
+  const hours = Math.floor((totalMinutes % (60 * 24)) / 60)
+  const minutes = totalMinutes % 60
+
+  if (days > 0) return `${days}d ${hours}h`
+  if (hours > 0) return `${hours}h ${minutes}m`
+  return `${minutes}m`
+}
+
+const formatDateTime = (value) => {
+  if (!value) return 'N/A'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return 'N/A'
+  return parsed.toLocaleString()
 }
 
 const getExecutionClass = (quality) => {
@@ -155,40 +194,37 @@ const TrendChart = ({ points, interval, loading, error, onIntervalChange }) => {
   )
 }
 
-const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, onMiss, qualityData, qualityApiFailed }) => {
+const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, qualityData, qualityApiFailed }) => {
   const conf = signal.confidence ?? 0
-  const isActive = signal.status !== 'CLOSED'
+  const isActive = signal.status === 'ACTIVE'
   const isTaken = signal.status === 'TAKEN'
-  const isMissed = signal.status === 'MISSED'
+  const isTargetHit = signal.result === 'TARGET_HIT'
   const [timeLeft, setTimeLeft] = useState('')
   const [chartInterval, setChartInterval] = useState('15m')
   const [chartDataByInterval, setChartDataByInterval] = useState({})
   const [chartLoading, setChartLoading] = useState(false)
   const [chartError, setChartError] = useState('')
   const qualityView = getSignalQualityView(qualityData, qualityApiFailed)
+  const expiryTimestamp = getExpiryTimestamp(signal)
+  const hasActiveValidity = signal.status === 'ACTIVE' || signal.status === 'TAKEN'
+  const hasCleanupTtl = Boolean(
+    signal.expireAt && (signal.result === 'TARGET_HIT' || signal.result === 'SL_HIT' || signal.result === 'EXPIRED')
+  )
+  const validityLabel = hasActiveValidity ? 'Valid for' : hasCleanupTtl ? 'Cleanup in' : ''
 
   useEffect(() => {
-    if (!signal.expireAt) return
+    if (!expiryTimestamp) return
 
     const updateTimer = () => {
       const now = Date.now()
-      const expire = new Date(signal.expireAt).getTime()
-      const diff = expire - now
-
-      if (diff <= 0) {
-        setTimeLeft('Expired')
-        return
-      }
-
-      const hours = Math.floor(diff / (1000 * 60 * 60))
-      const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60))
-      setTimeLeft(hours > 0 ? `${hours}h ${minutes}m` : `${minutes} min`)
+      const diff = expiryTimestamp - now
+      setTimeLeft(formatCountdown(diff))
     }
 
     updateTimer()
-    const interval = setInterval(updateTimer, 60000)
+    const interval = setInterval(updateTimer, 30000)
     return () => clearInterval(interval)
-  }, [signal.expireAt])
+  }, [expiryTimestamp])
 
   useEffect(() => {
     if (!isExpanded || !signal?.coin) return
@@ -237,13 +273,6 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, onMis
     return 'LOW'
   }
 
-  const getConfClass = (c) => {
-    if (c >= 80) return 'bg-[#173427] text-[#64f2b3] border-[#2a6b4e]'
-    if (c >= 65) return 'bg-[#162a45] text-[#8fc3ff] border-[#34527c]'
-    if (c >= 50) return 'bg-[#3a2d10] text-[#ffd56a] border-[#6b551f]'
-    return 'bg-[#2f394d] text-[#c3d0e8] border-[#475772]'
-  }
-
   const profitPercent = ((signal.target - signal.entryPrice) / signal.entryPrice * 100).toFixed(2)
   const lossPercent = ((signal.stopLoss - signal.entryPrice) / signal.entryPrice * 100).toFixed(2)
   const reason = signal.reason || {}
@@ -256,7 +285,7 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, onMis
         ${isExpanded ? 'border-[#f0b90b]/50 shadow-[0_20px_36px_rgba(5,8,15,0.52)]' : 'border-[#2a3a55] hover:border-[#3b4f73]'}
         ${conf < 50 ? 'opacity-70' : ''}
         ${isTaken ? 'ring-2 ring-[#19c37d]/40' : ''}
-        ${isMissed ? 'ring-2 ring-[#f6465d]/40' : ''}
+        ${isTargetHit ? 'ring-2 ring-[#19c37d]/30' : ''}
       `}
     >
       <div className="p-5 cursor-pointer" onClick={onToggle}>
@@ -290,16 +319,18 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, onMis
           </div>
 
           <div className="flex items-center gap-3">
-            <span className={`px-3 py-1 text-sm font-semibold rounded-lg border ${getConfClass(conf)}`}>
-              {getConfLabel(conf)}
-            </span>
+            {(hasActiveValidity || hasCleanupTtl) && timeLeft && (
+              <span className={`px-2.5 py-1 text-xs font-semibold rounded-lg border ${timeLeft === 'Expired' ? 'bg-[#3b1b26] text-[#ff8fa1] border-[#6b3040]' : 'bg-[#3a2d10] text-[#ffd56a] border-[#6b551f]'}`}>
+                {validityLabel} {timeLeft}
+              </span>
+            )}
 
             <span
               className={`
                 px-3 py-1 text-xs font-medium rounded-full
                 ${signal.status === 'ACTIVE' ? 'bg-[#172b49] text-[#85baff]' : ''}
                 ${signal.status === 'TAKEN' ? 'bg-[#173427] text-[#64f2b3]' : ''}
-                ${signal.status === 'MISSED' ? 'bg-[#3b1b26] text-[#ff8fa1]' : ''}
+                ${(signal.status === 'CLOSED' && signal.result === 'TARGET_HIT') ? 'bg-[#173427] text-[#64f2b3]' : ''}
                 ${signal.status === 'CLOSED' ? 'bg-[#23314a] text-[#a0b3d4]' : ''}
               `}
             >
@@ -309,22 +340,29 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, onMis
         </div>
 
         {!isExpanded && (
-          <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
-            <div>
-              <span className="text-[#90a4c7]">Target:</span>
-              <span className="ml-1 font-semibold text-[#64f2b3]">${signal.target}</span>
-              <span className="ml-1 text-[#64f2b3]">(+{profitPercent}%)</span>
-            </div>
-            <div>
-              <span className="text-[#90a4c7]">Stop:</span>
-              <span className="ml-1 font-semibold text-[#ff8fa1]">${signal.stopLoss}</span>
-              <span className="ml-1 text-[#ff8fa1]">({lossPercent}%)</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className={`px-1.5 py-0.5 rounded text-xs font-semibold ${getExecutionClass(qualityView.executionQuality)}`}>
-                {qualityView.executionQuality}
-              </span>
-              <span className="text-xs text-[#8ea2c4]">Slip: {qualityView.slippageRisk}</span>
+          <div className="mt-4 space-y-3">
+            <ConfidenceComparison
+              machineConfidenceRaw={signal.confidence}
+              aiConfidenceRaw={signal.aiConfidence}
+            />
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+              <div>
+                <span className="text-[#90a4c7]">Target:</span>
+                <span className="ml-1 font-semibold text-[#64f2b3]">${signal.target}</span>
+                <span className="ml-1 text-[#64f2b3]">(+{profitPercent}%)</span>
+              </div>
+              <div>
+                <span className="text-[#90a4c7]">Stop:</span>
+                <span className="ml-1 font-semibold text-[#ff8fa1]">${signal.stopLoss}</span>
+                <span className="ml-1 text-[#ff8fa1]">({lossPercent}%)</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className={`px-1.5 py-0.5 rounded text-xs font-semibold ${getExecutionClass(qualityView.executionQuality)}`}>
+                  {qualityView.executionQuality}
+                </span>
+                <span className="text-xs text-[#8ea2c4]">Slip: {qualityView.slippageRisk}</span>
+              </div>
             </div>
           </div>
         )}
@@ -332,7 +370,7 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, onMis
 
       {isExpanded && (
         <div className="border-t border-[#2a3a55] bg-[#0d1728] p-5">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
             <div className="bg-[#111b2d] p-4 rounded-xl border border-[#2a3a55]">
               <p className="text-xs text-[#8ea2c4] uppercase tracking-wider">Entry</p>
               <p className="text-2xl font-bold text-white">${signal.entryPrice}</p>
@@ -347,11 +385,17 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, onMis
               <p className="text-2xl font-bold text-[#ff8fa1]">${signal.stopLoss}</p>
               <p className="text-sm text-[#ff8fa1]">{lossPercent}% loss</p>
             </div>
-            <div className="bg-[#111b2d] p-4 rounded-xl border border-[#2a3a55]">
-              <p className="text-xs text-[#8ea2c4] uppercase tracking-wider">Confidence</p>
-              <p className="text-2xl font-bold text-[#f0b90b]">{conf}%</p>
-              <p className="text-sm text-[#a1b4d4]">{signal.signalQuality || getConfLabel(conf)}</p>
-            </div>
+          </div>
+
+          <div className="mb-6">
+            <ConfidenceComparison
+              machineConfidenceRaw={signal.confidence}
+              aiConfidenceRaw={signal.aiConfidence}
+              expanded
+            />
+            <p className="mt-2 text-xs text-[#8ea2c4]">
+              Overall quality: <span className="font-semibold text-[#dbe7fb]">{signal.signalQuality || getConfLabel(conf)}</span>
+            </p>
           </div>
 
           <div className="mb-6 bg-[#111b2d] rounded-xl border border-[#2a3a55] p-4">
@@ -395,15 +439,6 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, onMis
             <p>News: <span className="font-semibold text-white">{reason.sentiment || 'N/A'}</span></p>
           </div>
 
-          {signal.explanation && (
-            <div className="mb-4 p-4 bg-[#0f1e35] border border-[#1e3a5f] rounded-xl">
-              <p className="text-xs text-[#8ea2c4] uppercase tracking-wider mb-2 font-semibold flex items-center gap-2">
-                <span className="text-[#f0b90b]">⚡</span> AI Signal Explanation
-              </p>
-              <p className="text-sm text-[#c8d8f0] leading-relaxed">{signal.explanation}</p>
-            </div>
-          )}
-
           {signal.groqInsight && (
             <div className="mb-4 p-4 bg-[#0f1e35] border border-[#2a1e5f] rounded-xl">
               <p className="text-xs text-[#8ea2c4] uppercase tracking-wider mb-2 font-semibold flex items-center gap-2">
@@ -413,12 +448,18 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, onMis
             </div>
           )}
 
-          {signal.createdAt && (
+          {(signal.createdAt || expiryTimestamp) && (
             <div className="mb-4 flex items-center gap-4 text-sm text-[#8ea2c4]">
-              <span>Generated: {new Date(signal.createdAt).toLocaleString()}</span>
-              {timeLeft && (
+              {signal.createdAt && <span>Generated: {new Date(signal.createdAt).toLocaleString()}</span>}
+              {(hasActiveValidity && signal.validUntil) && (
+                <span>Valid till: {formatDateTime(signal.validUntil)}</span>
+              )}
+              {(hasCleanupTtl && signal.expireAt) && (
+                <span>Auto cleanup: {formatDateTime(signal.expireAt)}</span>
+              )}
+              {(hasActiveValidity || hasCleanupTtl) && timeLeft && (
                 <span className={timeLeft === 'Expired' ? 'text-[#f6465d] font-semibold' : 'text-[#ffd56a] font-semibold'}>
-                  {timeLeft === 'Expired' ? 'Expired' : `Expires in ${timeLeft}`}
+                  {timeLeft === 'Expired' ? 'Expired' : `${validityLabel} ${timeLeft}`}
                 </span>
               )}
             </div>
@@ -441,26 +482,13 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, onMis
               >
                 {actionLoading === signal._id ? 'Processing...' : 'Take Trade'}
               </button>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onMiss(signal._id)
-                }}
-                disabled={actionLoading === signal._id}
-                className="
-                  px-6 py-3 text-sm font-bold bg-[#f6465d] text-white
-                  rounded-xl hover:bg-[#dd3e53]
-                  disabled:opacity-50 disabled:cursor-not-allowed
-                "
-              >
-                Miss
-              </button>
             </div>
           ) : (
             <div className="p-4 bg-[#1a2740] rounded-xl border border-[#2d3f5d]">
               <p className="text-sm font-medium text-[#d1dcf0]">
                 {signal.result === 'TARGET_HIT' && 'Target Hit: this signal reached its profit target.'}
                 {signal.result === 'SL_HIT' && 'Stop Loss Hit: this signal hit the stop loss.'}
+                {signal.result === 'EXPIRED' && 'Signal Expired: validity window ended before target or stop loss.'}
                 {signal.result === 'PENDING' && 'Signal closed without target or stop loss hit.'}
               </p>
               {signal.closedAt && (
@@ -476,8 +504,12 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, onMis
   )
 }
 
-const Signals = ({ signals, loading, actionLoading, onTake, onMiss, qualityBySymbol = {}, qualityApiFailed = false }) => {
+const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}, qualityApiFailed = false }) => {
   const [expandedId, setExpandedId] = useState(null)
+  const generatedRef = useRef(null)
+  const targetHitRef = useRef(null)
+  const slHitRef = useRef(null)
+  const expiredRef = useRef(null)
 
   if (loading) {
     return (
@@ -499,48 +531,74 @@ const Signals = ({ signals, loading, actionLoading, onTake, onMiss, qualityBySym
     )
   }
 
-  const activeSignals = signals.filter((s) => s.status !== 'CLOSED')
-  const closedSignals = signals.filter((s) => s.status === 'CLOSED')
-  const singleSignal = activeSignals.length === 1
+  const generatedSignals = signals.filter((s) => s.status === 'ACTIVE' || s.status === 'TAKEN')
+  const targetHitSignals = signals.filter((s) => s.result === 'TARGET_HIT')
+  const slHitSignals = signals.filter((s) => s.result === 'SL_HIT')
+  const expiredSignals = signals.filter((s) => s.result === 'EXPIRED')
 
-  if (singleSignal) {
-    const signal = activeSignals[0]
-    return (
-      <div>
-        <div className="mb-6">
-          <h2 className="text-2xl font-bold text-white">New Signal Available</h2>
-          <p className="text-[#8ea2c4] text-sm">Review the details below and take action</p>
-          {qualityApiFailed && (
-            <p className="text-xs text-[#ffd56a] mt-2">
-              Market quality feed unavailable. Showing fallback labels.
-            </p>
-          )}
-        </div>
+  const renderSignalGroup = (groupSignals) => (
+    <div className="space-y-3">
+      {groupSignals.map((signal) => (
+        <SignalCard
+          key={signal._id}
+          signal={signal}
+          isExpanded={expandedId === signal._id}
+          onToggle={() => setExpandedId(expandedId === signal._id ? null : signal._id)}
+          actionLoading={actionLoading}
+          onTake={onTake}
+          qualityData={qualityBySymbol?.[signal.coin]}
+          qualityApiFailed={qualityApiFailed}
+        />
+      ))}
+    </div>
+  )
 
-        <div className="max-w-3xl mx-auto">
-          <SignalCard
-            key={signal._id}
-            signal={signal}
-            isExpanded={true}
-            onToggle={() => {}}
-            actionLoading={actionLoading}
-            onTake={onTake}
-            onMiss={onMiss}
-            qualityData={qualityBySymbol?.[signal.coin]}
-            qualityApiFailed={qualityApiFailed}
-          />
-        </div>
-      </div>
-    )
+  const jumpToSection = (sectionRef) => {
+    if (!sectionRef?.current) return
+    sectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
   return (
     <div>
       <div className="mb-6">
-        <h2 className="text-2xl font-bold text-white">Trading Signals</h2>
+        <h2 className="text-2xl font-bold text-white">Signal Vault</h2>
         <p className="text-[#8ea2c4] text-sm mt-1">
-          {activeSignals.length} active • {closedSignals.length} completed • {signals.length} total
+          {generatedSignals.length} generated | {targetHitSignals.length} target hit | {slHitSignals.length} SL hit | {expiredSignals.length} expired
         </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => jumpToSection(generatedRef)}
+            disabled={generatedSignals.length === 0}
+            className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#162a45] text-[#8fc3ff] border border-[#34527c] hover:bg-[#1b3354] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Generated ({generatedSignals.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => jumpToSection(targetHitRef)}
+            disabled={targetHitSignals.length === 0}
+            className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#173427] text-[#64f2b3] border border-[#2a6b4e] hover:bg-[#1c4231] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Target Hit ({targetHitSignals.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => jumpToSection(slHitRef)}
+            disabled={slHitSignals.length === 0}
+            className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#332238] text-[#ffb0c2] border border-[#6b3f4f] hover:bg-[#412b46] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            SL Hit ({slHitSignals.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => jumpToSection(expiredRef)}
+            disabled={expiredSignals.length === 0}
+            className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#243247] text-[#bfd0ea] border border-[#3f5575] hover:bg-[#2b3c54] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Expired ({expiredSignals.length})
+          </button>
+        </div>
         {qualityApiFailed && (
           <p className="text-xs text-[#ffd56a] mt-2">
             Market quality feed unavailable. Showing fallback labels.
@@ -549,51 +607,43 @@ const Signals = ({ signals, loading, actionLoading, onTake, onMiss, qualityBySym
       </div>
 
       <div className="space-y-4">
-        {activeSignals.length > 0 && (
-          <div>
+        {generatedSignals.length > 0 && (
+          <div ref={generatedRef} className="scroll-mt-24">
             <h3 className="text-sm font-semibold text-[#8ea2c4] uppercase tracking-wider mb-3 flex items-center gap-2">
               <span className="w-2 h-2 bg-[#f0b90b] rounded-full"></span>
-              Active Signals ({activeSignals.length})
+              Generated Signals ({generatedSignals.length})
             </h3>
-            <div className="space-y-3">
-              {activeSignals.map((signal) => (
-                <SignalCard
-                  key={signal._id}
-                  signal={signal}
-                  isExpanded={expandedId === signal._id}
-                  onToggle={() => setExpandedId(expandedId === signal._id ? null : signal._id)}
-                  actionLoading={actionLoading}
-                  onTake={onTake}
-                  onMiss={onMiss}
-                  qualityData={qualityBySymbol?.[signal.coin]}
-                  qualityApiFailed={qualityApiFailed}
-                />
-              ))}
-            </div>
+            {renderSignalGroup(generatedSignals)}
           </div>
         )}
 
-        {closedSignals.length > 0 && (
-          <div className="mt-8">
+        {targetHitSignals.length > 0 && (
+          <div ref={targetHitRef} className="mt-8 scroll-mt-24">
             <h3 className="text-sm font-semibold text-[#8ea2c4] uppercase tracking-wider mb-3 flex items-center gap-2">
-              <span className="w-2 h-2 bg-[#5f7294] rounded-full"></span>
-              Completed Signals ({closedSignals.length})
+              <span className="w-2 h-2 bg-[#19c37d] rounded-full"></span>
+              Target Hit Signals ({targetHitSignals.length})
             </h3>
-            <div className="space-y-3">
-              {closedSignals.map((signal) => (
-                <SignalCard
-                  key={signal._id}
-                  signal={signal}
-                  isExpanded={expandedId === signal._id}
-                  onToggle={() => setExpandedId(expandedId === signal._id ? null : signal._id)}
-                  actionLoading={actionLoading}
-                  onTake={onTake}
-                  onMiss={onMiss}
-                  qualityData={qualityBySymbol?.[signal.coin]}
-                  qualityApiFailed={qualityApiFailed}
-                />
-              ))}
-            </div>
+            {renderSignalGroup(targetHitSignals)}
+          </div>
+        )}
+
+        {slHitSignals.length > 0 && (
+          <div ref={slHitRef} className="mt-8 scroll-mt-24">
+            <h3 className="text-sm font-semibold text-[#8ea2c4] uppercase tracking-wider mb-3 flex items-center gap-2">
+              <span className="w-2 h-2 bg-[#ff8fa1] rounded-full"></span>
+              SL Hit Signals ({slHitSignals.length})
+            </h3>
+            {renderSignalGroup(slHitSignals)}
+          </div>
+        )}
+
+        {expiredSignals.length > 0 && (
+          <div ref={expiredRef} className="mt-8 scroll-mt-24">
+            <h3 className="text-sm font-semibold text-[#8ea2c4] uppercase tracking-wider mb-3 flex items-center gap-2">
+              <span className="w-2 h-2 bg-[#a8b8d7] rounded-full"></span>
+              Expired Signals ({expiredSignals.length})
+            </h3>
+            {renderSignalGroup(expiredSignals)}
           </div>
         )}
       </div>
@@ -601,4 +651,6 @@ const Signals = ({ signals, loading, actionLoading, onTake, onMiss, qualityBySym
   )
 }
 
+
 export default Signals
+

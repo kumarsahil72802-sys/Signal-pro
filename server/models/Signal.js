@@ -44,6 +44,7 @@ const signalSchema = new mongoose.Schema({
   regime: { type: String, default: null },
   higherTimeframeTrend: { type: String, default: null },
   aiScore: { type: Number, min: 0, max: 100, default: null },
+  aiConfidence: { type: Number, min: 0, max: 100, default: null },
   aiDecision: {
     type: String,
     enum: ['STRONG_APPROVE', 'APPROVE', 'WEAK_APPROVE', 'REJECT'],
@@ -51,19 +52,19 @@ const signalSchema = new mongoose.Schema({
   },
   aiMessage: { type: String, default: null },
   groqInsight: { type: String, default: '' },
-  explanation: { type: String, default: null },
   status: {
     type: String,
-    enum: ['ACTIVE', 'TAKEN', 'MISSED', 'CLOSED'],
+    enum: ['ACTIVE', 'TAKEN', 'CLOSED'],
     default: 'ACTIVE'
   },
   result: {
     type: String,
-    enum: ['PENDING', 'TARGET_HIT', 'SL_HIT'],
+    enum: ['PENDING', 'TARGET_HIT', 'SL_HIT', 'EXPIRED'],
     default: 'PENDING'
   },
   isMissedOpportunity: { type: Boolean, default: false },
   wasTaken: { type: Boolean, default: false },
+  validUntil: { type: Date, default: null },
   missedAt: { type: Date },
   closedAt: { type: Date },
   createdAt: { type: Date, default: Date.now },
@@ -77,9 +78,16 @@ signalSchema.index(
   { expireAt: 1 },
   {
     expireAfterSeconds: 0,
-    partialFilterExpression: { status: 'MISSED' }
+    partialFilterExpression: {
+      $or: [
+        { status: 'CLOSED', result: 'TARGET_HIT' },
+        { status: 'CLOSED', result: 'SL_HIT' },
+        { status: 'CLOSED', result: 'EXPIRED' }
+      ]
+    }
   }
 );
 signalSchema.index({ status: 1 });
+signalSchema.index({ status: 1, validUntil: 1 });
 
 module.exports = mongoose.model('Signal', signalSchema);

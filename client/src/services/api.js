@@ -21,7 +21,7 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-export const getSignals = () => api.get("/signals");
+export const getSignals = () => api.get("/signals/all");
 
 export const takeSignal = (id) => api.patch(`/signals/${id}/take`);
 

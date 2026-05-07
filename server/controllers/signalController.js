@@ -1,4 +1,27 @@
 const Signal = require('../models/Signal');
+const { settings } = require('../services/signalEngine/config');
+
+const { SIGNAL_VALIDITY_MS } = settings;
+
+function normalizeConfidence(value) {
+  if (value == null || value === '') return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.max(0, Math.min(100, Math.round(parsed)));
+}
+
+function resolveSignalValidUntil(signal) {
+  if (!signal) return null;
+  if (signal.validUntil) {
+    const ts = new Date(signal.validUntil).getTime();
+    if (Number.isFinite(ts)) return new Date(ts);
+  }
+
+  if (!signal.createdAt) return null;
+  const createdTs = new Date(signal.createdAt).getTime();
+  if (!Number.isFinite(createdTs)) return null;
+  return new Date(createdTs + SIGNAL_VALIDITY_MS);
+}
 
 const createSignal = async (req, res) => {
   try {
@@ -29,6 +52,7 @@ const createSignal = async (req, res) => {
     }
 
     const confidence = req.body.confidence ?? 0;
+    const aiConfidence = normalizeConfidence(req.body.aiConfidence);
 
     if (confidence < 50) {
       console.log('Weak signal ignored');
@@ -42,7 +66,9 @@ const createSignal = async (req, res) => {
       target,
       stopLoss,
       strength,
-      confidence
+      confidence,
+      aiConfidence,
+      validUntil: new Date(Date.now() + SIGNAL_VALIDITY_MS)
     });
 
     await signal.save();
@@ -60,7 +86,7 @@ const createSignal = async (req, res) => {
 const getActiveSignals = async (req, res) => {
   try {
     const signals = await Signal.find({
-      status: { $in: ['ACTIVE', 'TAKEN', 'MISSED'] }
+      status: { $in: ['ACTIVE', 'TAKEN'] }
     }).sort({ confidence: -1, createdAt: -1 });
     res.json(signals);
   } catch (error) {
@@ -88,6 +114,21 @@ const takeSignal = async (req, res) => {
       return res.status(400).json({ message: `Signal is already ${signal.status}` });
     }
 
+    const resolvedValidUntil = resolveSignalValidUntil(signal);
+    if (!signal.validUntil && resolvedValidUntil) {
+      signal.validUntil = resolvedValidUntil;
+    }
+
+    if (resolvedValidUntil && resolvedValidUntil.getTime() <= Date.now()) {
+      const closedAt = new Date();
+      signal.status = 'CLOSED';
+      signal.result = 'EXPIRED';
+      signal.closedAt = closedAt;
+      signal.expireAt = new Date(closedAt.getTime() + 8 * 60 * 60 * 1000);
+      await signal.save();
+      return res.status(400).json({ message: 'Signal has already expired' });
+    }
+
     signal.status = 'TAKEN';
     await signal.save();
     console.log(`[API] Signal taken: ${signal.coin} (${signal._id})`);
@@ -112,11 +153,14 @@ const missSignal = async (req, res) => {
     }
 
     const missedAt = new Date();
-    signal.status = 'MISSED';
+    signal.status = 'CLOSED';
+    signal.result = 'TARGET_HIT';
+    signal.isMissedOpportunity = true;
     signal.missedAt = missedAt;
     signal.expireAt = new Date(missedAt.getTime() + 8 * 60 * 60 * 1000);
+    signal.closedAt = missedAt;
     await signal.save();
-    console.log(`[API] Signal manually missed: ${signal.coin} (${signal._id})`);
+    console.log(`[API] Signal marked target-hit (not taken): ${signal.coin} (${signal._id})`);
     res.json(signal);
   } catch (error) {
     if (error.name === 'CastError') {
@@ -130,8 +174,8 @@ const missSignal = async (req, res) => {
  * Get performance statistics using MongoDB aggregation
  * FIXED: Calculate win rate from TAKEN signals only
  * - TAKEN signals: user actually took these (win or loss)
- * - MISSED signals: user didn't take, target hit (separate metric)
- * - EXPIRED signals: user didn't take, SL hit or TTL expired (separate metric)
+ * - TARGET_HIT not-taken signals: user didn't take, target hit (separate metric)
+ * - EXPIRED signals: time-based timeout closes (separate metric)
  */
 const getStats = async (req, res) => {
   try {
@@ -171,17 +215,16 @@ const getStats = async (req, res) => {
       }
     ]);
 
-    // Count MISSED opportunities (user didn't take, target hit)
+    // Count target-hit opportunities (user didn't take, target hit)
     const totalMissed = await Signal.countDocuments({
-      status: 'MISSED',
-      isMissedOpportunity: true
+      result: 'TARGET_HIT',
+      wasTaken: false
     });
 
-    // Count EXPIRED signals (user didn't take, SL hit)
+    // Count EXPIRED signals (timeout-based closes)
     const totalExpired = await Signal.countDocuments({
       status: 'CLOSED',
-      wasTaken: false,
-      result: 'SL_HIT'
+      result: 'EXPIRED'
     });
 
     // Get last 10 TAKEN signals for recent performance

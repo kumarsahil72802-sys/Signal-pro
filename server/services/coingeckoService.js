@@ -2,117 +2,188 @@ const axios = require('axios');
 const NodeCache = require('node-cache');
 
 const COINGECKO_BASE = 'https://api.coingecko.com/api/v3';
+const CACHE_TTL_SECONDS = 900; // 15 min
+const RATE_LIMIT_COOLDOWN_MS = 60 * 1000; // 1 min
+const MAX_MARKET_COINS = 250;
+const MIN_FETCH_SIZE = 50;
+const STALE_BACKUP_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h
 
-// Cache with 15 minute TTL for market data
-const cache = new NodeCache({ stdTTL: 900, checkperiod: 120 });
-const CACHE_KEY = 'market_data';
+const cache = new NodeCache({ stdTTL: CACHE_TTL_SECONDS, checkperiod: 120 });
+const MARKET_CACHE_KEY = 'market_data';
 
-// Track in-flight requests to prevent concurrent API calls
 let inFlightRequest = null;
 let lastRateLimitTime = 0;
-const RATE_LIMIT_COOLDOWN = 60000; // 1 minute cooldown after rate limit
+let lastSuccess = {
+  data: [],
+  fetchedAt: 0
+};
 
-// Demo data as fallback when API is rate-limited
-const DEMO_COINS = [
-  { id: 'bitcoin', name: 'Bitcoin', symbol: 'btc', current_price: 75907.00, price_change_percentage_24h: -0.93, image: 'https://assets.coingecko.com/coins/images/1/large/bitcoin.png' },
-  { id: 'ethereum', name: 'Ethereum', symbol: 'eth', current_price: 2275.38, price_change_percentage_24h: 0.00, image: 'https://assets.coingecko.com/coins/images/279/large/ethereum.png' },
-  { id: 'tether', name: 'Tether', symbol: 'usdt', current_price: 1.00, price_change_percentage_24h: -0.02, image: 'https://assets.coingecko.com/coins/images/325/large/Tether.png' },
-  { id: 'ripple', name: 'XRP', symbol: 'xrp', current_price: 1.37, price_change_percentage_24h: -1.04, image: 'https://assets.coingecko.com/coins/images/44/large/xrp-symbol-white-128.png' },
-  { id: 'binancecoin', name: 'BNB', symbol: 'bnb', current_price: 622.11, price_change_percentage_24h: 0.10, image: 'https://assets.coingecko.com/coins/images/825/large/bnb-icon2_2x.png' },
-  { id: 'usd-coin', name: 'USDC', symbol: 'usdc', current_price: 1.00, price_change_percentage_24h: 0.00, image: 'https://assets.coingecko.com/coins/images/6319/large/USD_Coin_icon.png' },
-  { id: 'solana', name: 'Solana', symbol: 'sol', current_price: 83.41, price_change_percentage_24h: -1.01, image: 'https://assets.coingecko.com/coins/images/4128/large/solana.png' },
-  { id: 'tron', name: 'TRON', symbol: 'trx', current_price: 0.32, price_change_percentage_24h: -0.57, image: 'https://assets.coingecko.com/coins/images/1094/large/tron-logo.png' },
-  { id: 'dogecoin', name: 'Dogecoin', symbol: 'doge', current_price: 0.10, price_change_percentage_24h: 2.10, image: 'https://assets.coingecko.com/coins/images/5/large/dogecoin.png' },
-  { id: 'cardano', name: 'Cardano', symbol: 'ada', current_price: 0.45, price_change_percentage_24h: 1.25, image: 'https://assets.coingecko.com/coins/images/975/large/cardano.png' },
-];
-
-async function getTopCoins(perPage = 10) {
-  // Check cache first
-  const cached = cache.get(CACHE_KEY);
-  if (cached) {
-    return cached.slice(0, perPage);
-  }
-
-  // Check rate limit cooldown
-  const now = Date.now();
-  if (now - lastRateLimitTime < RATE_LIMIT_COOLDOWN) {
-    const remaining = Math.ceil((RATE_LIMIT_COOLDOWN - (now - lastRateLimitTime)) / 1000);
-    console.log(`[CoinGecko] Rate limit cooldown active (${remaining}s remaining), using demo data`);
-    return DEMO_COINS.slice(0, perPage);
-  }
-
-  // If a request is already in flight, wait for it
-  if (inFlightRequest) {
-    try {
-      const data = await inFlightRequest;
-      return data.slice(0, perPage);
-    } catch (err) {
-      // If the in-flight request failed, continue to try our own request
-    }
-  }
-
-  // Create new request
-  const requestPromise = (async () => {
-    try {
-      const response = await axios.get(`${COINGECKO_BASE}/coins/markets`, {
-        params: {
-          vs_currency: 'usd',
-          order: 'market_cap_desc',
-          per_page: perPage,
-          page: 1,
-          sparkline: true,
-        },
-        timeout: 10000,
-        headers: {
-          'Accept': 'application/json',
-        }
-      });
-
-      const data = response.data.map((coin) => ({
-        id: coin.id,
-        name: coin.name,
-        symbol: coin.symbol,
-        current_price: coin.current_price,
-        price_change_percentage_24h: coin.price_change_percentage_24h,
-        image: coin.image,
-        market_cap: coin.market_cap,
-        market_cap_rank: coin.market_cap_rank,
-        total_volume: coin.total_volume,
-        high_24h: coin.high_24h,
-        low_24h: coin.low_24h,
-        ath: coin.ath,
-        atl: coin.atl,
-        circulating_supply: coin.circulating_supply,
-        total_supply: coin.total_supply,
-        max_supply: coin.max_supply,
-        sparkline_in_7d: {
-          price: Array.isArray(coin.sparkline_in_7d?.price) ? coin.sparkline_in_7d.price : []
-        }
-      }));
-
-      // Store in cache
-      cache.set(CACHE_KEY, data);
-      console.log('[CoinGecko] Fresh market data cached');
-
-      return data;
-    } catch (error) {
-      console.error('CoinGecko API error:', error.message);
-      
-      if (error.response?.status === 429) {
-        lastRateLimitTime = Date.now();
-        console.log('Rate limited, returning demo data');
-        return DEMO_COINS.slice(0, perPage);
-      }
-      
-      console.log('API error, returning demo data');
-      return DEMO_COINS.slice(0, perPage);
-    } finally {
-      inFlightRequest = null;
-    }
-  })();
-
-  inFlightRequest = requestPromise;
-  return requestPromise;
+function normalizePerPage(perPage) {
+  const parsed = Number(perPage);
+  if (!Number.isFinite(parsed)) return 10;
+  return Math.max(1, Math.min(MAX_MARKET_COINS, Math.round(parsed)));
 }
 
-module.exports = { getTopCoins };
+function mapMarketCoin(coin) {
+  return {
+    id: coin.id,
+    name: coin.name,
+    symbol: coin.symbol,
+    current_price: coin.current_price,
+    price_change_percentage_24h: coin.price_change_percentage_24h,
+    image: coin.image,
+    market_cap: coin.market_cap,
+    market_cap_rank: coin.market_cap_rank,
+    total_volume: coin.total_volume,
+    high_24h: coin.high_24h,
+    low_24h: coin.low_24h,
+    ath: coin.ath,
+    atl: coin.atl,
+    circulating_supply: coin.circulating_supply,
+    total_supply: coin.total_supply,
+    max_supply: coin.max_supply,
+    sparkline_in_7d: {
+      price: Array.isArray(coin.sparkline_in_7d?.price) ? coin.sparkline_in_7d.price : []
+    }
+  };
+}
+
+function buildStatus(source, reason = null, fetchedAt = null) {
+  return {
+    source, // fresh | cache | stale_backup | unavailable
+    reason,
+    fetchedAt
+  };
+}
+
+function getCachedCoins() {
+  const cached = cache.get(MARKET_CACHE_KEY);
+  return Array.isArray(cached) ? cached : [];
+}
+
+function getStaleBackupCoins() {
+  if (!Array.isArray(lastSuccess.data) || lastSuccess.data.length === 0) {
+    return [];
+  }
+  if (Date.now() - lastSuccess.fetchedAt > STALE_BACKUP_MAX_AGE_MS) {
+    return [];
+  }
+  return lastSuccess.data;
+}
+
+async function fetchTopCoinsFromApi(fetchSize) {
+  const response = await axios.get(`${COINGECKO_BASE}/coins/markets`, {
+    params: {
+      vs_currency: 'usd',
+      order: 'market_cap_desc',
+      per_page: fetchSize,
+      page: 1,
+      sparkline: true
+    },
+    timeout: 10000,
+    headers: {
+      Accept: 'application/json'
+    }
+  });
+
+  const mapped = Array.isArray(response.data)
+    ? response.data.map(mapMarketCoin)
+    : [];
+
+  cache.set(MARKET_CACHE_KEY, mapped);
+  lastSuccess = {
+    data: mapped,
+    fetchedAt: Date.now()
+  };
+  console.log(`[CoinGecko] Fresh market data cached (${mapped.length} coins)`);
+  return mapped;
+}
+
+async function getTopCoinsSnapshot(perPage = 10, options = {}) {
+  const requested = normalizePerPage(perPage);
+  const allowStale = options.allowStale !== false;
+  const now = Date.now();
+
+  const cached = getCachedCoins();
+  if (cached.length >= requested) {
+    return {
+      coins: cached.slice(0, requested),
+      status: buildStatus('cache', null, new Date(lastSuccess.fetchedAt || now).toISOString())
+    };
+  }
+
+  if (now - lastRateLimitTime < RATE_LIMIT_COOLDOWN_MS) {
+    const stale = allowStale ? getStaleBackupCoins() : [];
+    if (stale.length >= requested) {
+      const remainingSec = Math.ceil((RATE_LIMIT_COOLDOWN_MS - (now - lastRateLimitTime)) / 1000);
+      return {
+        coins: stale.slice(0, requested),
+        status: buildStatus('stale_backup', `rate_limit_cooldown_${remainingSec}s`, new Date(lastSuccess.fetchedAt).toISOString())
+      };
+    }
+
+    return {
+      coins: [],
+      status: buildStatus('unavailable', 'rate_limit_cooldown_and_no_stale_data')
+    };
+  }
+
+  if (inFlightRequest) {
+    try {
+      const sharedData = await inFlightRequest;
+      return {
+        coins: sharedData.slice(0, requested),
+        status: buildStatus('fresh', null, new Date(lastSuccess.fetchedAt || Date.now()).toISOString())
+      };
+    } catch {
+      // Let this call execute a normal fetch/fallback path below.
+    }
+  }
+
+  const fetchSize = Math.max(MIN_FETCH_SIZE, requested);
+  const requestPromise = fetchTopCoinsFromApi(fetchSize);
+  inFlightRequest = requestPromise;
+
+  try {
+    const data = await requestPromise;
+    return {
+      coins: data.slice(0, requested),
+      status: buildStatus('fresh', null, new Date(lastSuccess.fetchedAt).toISOString())
+    };
+  } catch (error) {
+    if (error.response?.status === 429) {
+      lastRateLimitTime = Date.now();
+    }
+
+    const reason = error.response?.status
+      ? `api_error_${error.response.status}`
+      : `api_error_${error.code || 'unknown'}`;
+
+    const stale = allowStale ? getStaleBackupCoins() : [];
+    if (stale.length >= requested) {
+      console.log(`[CoinGecko] ${reason}; using stale backup (${stale.length} coins)`);
+      return {
+        coins: stale.slice(0, requested),
+        status: buildStatus('stale_backup', reason, new Date(lastSuccess.fetchedAt).toISOString())
+      };
+    }
+
+    console.log(`[CoinGecko] ${reason}; no stale backup available`);
+    return {
+      coins: [],
+      status: buildStatus('unavailable', reason)
+    };
+  } finally {
+    inFlightRequest = null;
+  }
+}
+
+async function getTopCoins(perPage = 10, options = {}) {
+  const snapshot = await getTopCoinsSnapshot(perPage, options);
+  return snapshot.coins;
+}
+
+module.exports = {
+  getTopCoins,
+  getTopCoinsSnapshot
+};

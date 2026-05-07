@@ -183,11 +183,15 @@ async function getBatchPrices(symbols) {
   }
 }
 
-async function getKlines(symbol, interval = '1h', limit = 100) { // 100 candles for accurate RSI/MACD calculation
+async function getKlines(symbol, interval = '1h', limit = 100, options = {}) { // 100 candles for accurate RSI/MACD calculation
   try {
+    const params = { symbol, interval, limit };
+    if (options.startTime != null) params.startTime = Number(options.startTime);
+    if (options.endTime != null) params.endTime = Number(options.endTime);
+
     const response = await axios.get(`${BINANCE_BASE}/klines`, {
       headers: getHeaders(),
-      params: { symbol, interval, limit },
+      params,
       timeout: 5000
     });
     return response.data.map(k => ({

@@ -2,7 +2,7 @@ const { getBatchPrices, getKlines, getTopUsdtSymbols, get24hTicker } = require('
 const NodeCache = require('node-cache');
 const { getExecutionQualityForSymbols } = require('../services/executionQualityService');
 const { getCoinImageCandidatesMap } = require('../services/coinImageService');
-const { getTopCoins } = require('../services/coingeckoService');
+const { getTopCoinsSnapshot } = require('../services/coingeckoService');
 
 const marketQualityCache = new NodeCache({ stdTTL: 6, checkperiod: 3 });
 const marketChartCache = new NodeCache({ stdTTL: 15, checkperiod: 5 });
@@ -205,8 +205,11 @@ const getMarketOverview = async (req, res) => {
     }
 
     try {
-      const coingeckoCoins = await getTopCoins(COINGECKO_ENRICH_LIMIT);
-      fundamentalsBySymbol = buildCoinGeckoSymbolMap(coingeckoCoins);
+      const marketSnapshot = await getTopCoinsSnapshot(COINGECKO_ENRICH_LIMIT, { allowStale: true });
+      fundamentalsBySymbol = buildCoinGeckoSymbolMap(marketSnapshot.coins);
+      if (marketSnapshot.status.source !== 'fresh' && marketSnapshot.status.source !== 'cache') {
+        console.log(`[Market] CoinGecko enrichment degraded: ${marketSnapshot.status.source} (${marketSnapshot.status.reason || 'no_reason'})`);
+      }
     } catch (error) {
       console.log(`[Market] CoinGecko enrich failed: ${error.message}`);
     }
