@@ -9,11 +9,15 @@ const tradeLogSchema = new mongoose.Schema({
   confidence: { type: Number },
   aiScore: { type: Number },
   regime: { type: String },
+  confidenceBand: { type: String },
+  segmentKey: { type: String, index: true },
+  machineVersion: { type: String },
   trigger: { type: String, index: true },
   createdAt: { type: Date, default: Date.now }
 });
 
 tradeLogSchema.index({ createdAt: 1 });
 tradeLogSchema.index({ trigger: 1, result: 1 });
+tradeLogSchema.index({ segmentKey: 1, result: 1 });
 
 module.exports = mongoose.model('TradeLog', tradeLogSchema);

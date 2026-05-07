@@ -23,6 +23,7 @@ const signalSchema = new mongoose.Schema({
     penalty: { type: Number, default: 0 }
   },
   sentimentScore: { type: Number, min: -1, max: 1, default: 0 },
+  newsSummary: { type: String, default: '' },
   reason: {
     trend: { type: String, default: 'NEUTRAL' },
     momentum: { type: String, default: 'WEAK' },
@@ -34,8 +35,21 @@ const signalSchema = new mongoose.Schema({
     deltaRatio: { type: String },
     volumeConfirmed: { type: String, default: 'NEUTRAL' },
     execution: { type: String, default: '' },
-    slippageRisk: { type: String, default: '' }
+    slippageRisk: { type: String, default: '' },
+    segment: { type: String, default: '' }
   },
+  sentimentBreakdown: {
+    status: { type: String, default: 'FALLBACK' },
+    source: { type: String, default: 'fallback_neutral' },
+    directionalScore: { type: Number, default: 0 },
+    adjustment: { type: Number, default: 0 },
+    articleCount: { type: Number, default: 0 },
+    articleBias: { type: Number, default: 0 },
+    macroBias: { type: Number, default: 0 }
+  },
+  segmentKey: { type: String, default: null, index: true },
+  guardrailFlags: [{ type: String }],
+  machineVersion: { type: String, default: 'winrate_v1' },
   trigger: {
     type: String,
     enum: ['EMA_TEST', 'EMA_ZONE', 'CROSSOVER', 'VOLATILITY_BREAKOUT', 'UNKNOWN'],
@@ -52,6 +66,13 @@ const signalSchema = new mongoose.Schema({
   },
   aiMessage: { type: String, default: null },
   groqInsight: { type: String, default: '' },
+  aiStatus: {
+    type: String,
+    enum: ['SUCCESS', 'FALLBACK', 'SKIPPED'],
+    default: 'SKIPPED'
+  },
+  aiAttempts: { type: Number, default: 0, min: 0 },
+  aiError: { type: String, default: null },
   status: {
     type: String,
     enum: ['ACTIVE', 'TAKEN', 'CLOSED'],

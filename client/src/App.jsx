@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { getSignals, takeSignal, missSignal, getMarketData, getMarketQuality, getNews } from './services/api'
+import { getSignals, takeSignal, getMarketData, getMarketQuality, getNews } from './services/api'
 import { NavTabs, Market, News, Signals, Stats, Toast } from './components'
 
 const CORE_REFRESH_MS = 12000
@@ -272,19 +272,6 @@ function App() {
     }
   }
 
-  const handleMiss = async (id) => {
-    setActionLoading(id)
-    try {
-      await missSignal(id)
-      await fetchSignals()
-      requestQuality(true)
-    } catch (err) {
-      console.error('Failed to miss signal:', err)
-    } finally {
-      setActionLoading(null)
-    }
-  }
-
   const handleSignalsClick = () => {
     setHasNewSignal(false)
   }
@@ -309,7 +296,6 @@ function App() {
             loading={signalsLoading}
             actionLoading={actionLoading}
             onTake={handleTake}
-            onMiss={handleMiss}
             qualityBySymbol={qualityBySymbol}
             qualityApiFailed={qualityApiFailed}
           />

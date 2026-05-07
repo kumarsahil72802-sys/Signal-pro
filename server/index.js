@@ -7,10 +7,12 @@ const signalRoutes = require("./routes/signalRoutes");
 const marketRoutes = require("./routes/marketRoutes");
 const newsRoutes = require("./routes/newsRoutes");
 const { startSignalMonitor, getMonitorStatus } = require("./services/signalMonitor");
-const { startSignalEngine, getEngineStatus, getDynamicThreshold } = require("./services/signalEngine");
+const { startSignalEngine, getEngineStatus, getDynamicThreshold, getLearningDiagnostics } = require("./services/signalEngine");
 const { initScheduler } = require("./services/scheduler");
 const { enforceSignalRetentionPolicy } = require("./services/signalRetentionService");
 const SystemConfig = require("./models/SystemConfig");
+const { buildWinrateDiagnostics } = require("./services/winrateDiagnosticsService");
+const { settings } = require("./services/signalEngine/config");
 
 const app = express();
 
@@ -47,12 +49,19 @@ app.get("/health", async (req, res) => {
   try {
     const threshold = getDynamicThreshold();
     const config = await SystemConfig.findOne({ key: "confidence_threshold" });
+    const cachedLearningDiagnostics = getLearningDiagnostics();
+    const diagnostics = cachedLearningDiagnostics || await buildWinrateDiagnostics();
 
     res.json({
       status: "ok",
       engine: getEngineStatus(),
       monitor: getMonitorStatus(),
       threshold: threshold,
+      baselineWinRate: diagnostics.baselineWinRate,
+      deltaWinRate: diagnostics.deltaWinRate,
+      rollingSampleSize: diagnostics.rollingSampleSize,
+      segmentHealthSummary: diagnostics.segmentHealthSummary || null,
+      sentimentEngineStatus: settings.SIGNAL_SENTIMENT_ENABLED ? 'ENABLED' : 'DISABLED',
       lastUpdated: config?.updatedAt || new Date(),
       timestamp: new Date().toISOString()
     });

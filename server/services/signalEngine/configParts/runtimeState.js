@@ -4,6 +4,7 @@ let lastLearningCheck = 0;
 let engineRunning = false;
 let engineStartTime = null;
 let engineTickInProgress = false;
+let learningDiagnostics = null;
 
 function getLastLearningCheck() {
   return lastLearningCheck;
@@ -37,6 +38,14 @@ function setEngineTickInProgress(value) {
   engineTickInProgress = value;
 }
 
+function getLearningDiagnostics() {
+  return learningDiagnostics;
+}
+
+function setLearningDiagnostics(value) {
+  learningDiagnostics = value;
+}
+
 module.exports = {
   lastSignalTimes,
   getLastLearningCheck,
@@ -46,5 +55,7 @@ module.exports = {
   getEngineStartTime,
   setEngineStartTime,
   isEngineTickInProgress,
-  setEngineTickInProgress
+  setEngineTickInProgress,
+  getLearningDiagnostics,
+  setLearningDiagnostics
 };

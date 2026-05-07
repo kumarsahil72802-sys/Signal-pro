@@ -10,6 +10,8 @@ const {
   updateConfidenceThreshold,
   getLastLearningCheck,
   setLastLearningCheck,
+  getLearningDiagnostics,
+  setLearningDiagnostics,
   isEngineRunning,
   setEngineRunning,
   setEngineStartTime,
@@ -18,6 +20,11 @@ const {
 } = require('./config');
 const { getBTCTrend } = require('./analysis');
 const { generateSignalForCoin } = require('./signalGenerator');
+const { analyzePerformance } = require('../aiLearning');
+const {
+  ensureWinrateBaseline,
+  buildWinrateDiagnostics
+} = require('../winrateDiagnosticsService');
 
 const {
   LEARNING_CHECK_INTERVAL_MS,
@@ -41,7 +48,12 @@ const {
   SIGNAL_EMA_TEST_PCT,
   SIGNAL_RANGING_SLOPE_MAX,
   SIGNAL_RANGING_BB_MAX,
-  SIGNAL_VALIDITY_HOURS
+  SIGNAL_VALIDITY_HOURS,
+  SIGNAL_AI_MODE,
+  SIGNAL_AI_ENRICHMENT_TIMING,
+  SIGNAL_AI_RETRY_COUNT,
+  SIGNAL_AI_RETRY_BACKOFF_MS,
+  SIGNAL_AI_TIMEOUT_MS
 } = settings;
 
 // ============================================================================
@@ -68,6 +80,8 @@ async function runAutoLearning() {
   setLastLearningCheck(now);
 
   try {
+    await ensureWinrateBaseline();
+
     // Get total count of all signals ever generated (for rate calculations)
     const totalGenerated = await Signal.countDocuments();
 
@@ -112,6 +126,21 @@ async function runAutoLearning() {
       console.log(`[LEARNING] Insufficient taken signals (${takenCount}/10), skipping threshold adjustment. ` +
         `Win rate: ${winRate.toFixed(1)}% (based on ${takenCount} taken signals). ` +
         `TargetHit: ${missedOpportunities}, Expired: ${expiredCount}`);
+
+      const perf = await analyzePerformance();
+      const diagnostics = await buildWinrateDiagnostics({
+        segmentHealthSummary: perf?.segmentHealthSummary || null
+      });
+      setLearningDiagnostics({
+        ...diagnostics,
+        generatedSignals: totalGenerated,
+        totalTaken: takenCount,
+        missedOpportunities,
+        expiredSignals: expiredCount,
+        threshold: oldThreshold,
+        thresholdChanged: false,
+        updatedAt: new Date().toISOString()
+      });
       return;
     }
 
@@ -154,6 +183,21 @@ async function runAutoLearning() {
         reason: 'no change needed'
       });
     }
+
+    const perf = await analyzePerformance({ forceRefresh: true });
+    const diagnostics = await buildWinrateDiagnostics({
+      segmentHealthSummary: perf?.segmentHealthSummary || null
+    });
+    setLearningDiagnostics({
+      ...diagnostics,
+      generatedSignals: totalGenerated,
+      totalTaken: takenCount,
+      missedOpportunities,
+      expiredSignals: expiredCount,
+      threshold: newThreshold,
+      thresholdChanged: newThreshold !== oldThreshold,
+      updatedAt: new Date().toISOString()
+    });
   } catch (error) {
     console.error(`[Learning] Error during analysis: ${error.message}`);
   }
@@ -237,7 +281,7 @@ async function startSignalEngine() {
     });
   }, CHECK_INTERVAL_MS);
   console.log(
-    `[ENGINE] Started. Profile:${SIGNAL_PROFILE} | Selector:${COIN_SELECTOR} | Interval:${CHECK_INTERVAL_MS / 60000}min | MaxCoins:${SIGNAL_MAX_COINS} | Cooldown:${SIGNAL_COOLDOWN_HOURS}h | Validity:${SIGNAL_VALIDITY_HOURS}h | 4HHard:${SIGNAL_USE_4H_HARD_FILTER} | BTCHard:${SIGNAL_USE_BTC_HARD_BLOCK} | AIReject:${SIGNAL_AI_REJECT_MODE} | LiquidityReject:${SIGNAL_LIQUIDITY_REJECT_MODE} | Depth:${SIGNAL_DEPTH_LIMIT} | DepthRange:${SIGNAL_ORDERBOOK_RANGE_PCT}% | SlopeMin:${SIGNAL_TRIGGER_SLOPE_MIN_ABS} | EMAProx:${SIGNAL_EMA_PROXIMITY_PCT}% | EMATest:${SIGNAL_EMA_TEST_PCT}% | RangeSlopeMax:${SIGNAL_RANGING_SLOPE_MAX} | RangeBBMax:${SIGNAL_RANGING_BB_MAX}%`
+    `[ENGINE] Started. Profile:${SIGNAL_PROFILE} | Selector:${COIN_SELECTOR} | Interval:${Math.round(CHECK_INTERVAL_MS / 1000)}s | MaxCoins:${SIGNAL_MAX_COINS} | Cooldown:${SIGNAL_COOLDOWN_HOURS}h | Validity:${SIGNAL_VALIDITY_HOURS}h | 4HHard:${SIGNAL_USE_4H_HARD_FILTER} | BTCHard:${SIGNAL_USE_BTC_HARD_BLOCK} | AIMode:${SIGNAL_AI_MODE} | AIEnrich:${SIGNAL_AI_ENRICHMENT_TIMING} | AIRetry:${SIGNAL_AI_RETRY_COUNT}@${SIGNAL_AI_RETRY_BACKOFF_MS}ms | AITimeout:${SIGNAL_AI_TIMEOUT_MS}ms | AIReject:${SIGNAL_AI_REJECT_MODE} | LiquidityReject:${SIGNAL_LIQUIDITY_REJECT_MODE} | Depth:${SIGNAL_DEPTH_LIMIT} | DepthRange:${SIGNAL_ORDERBOOK_RANGE_PCT}% | SlopeMin:${SIGNAL_TRIGGER_SLOPE_MIN_ABS} | EMAProx:${SIGNAL_EMA_PROXIMITY_PCT}% | EMATest:${SIGNAL_EMA_TEST_PCT}% | RangeSlopeMax:${SIGNAL_RANGING_SLOPE_MAX} | RangeBBMax:${SIGNAL_RANGING_BB_MAX}%`
   );
 }
 
@@ -250,6 +294,7 @@ module.exports = {
   runEngine,
   startSignalEngine,
   getEngineStatus,
-  getDynamicThreshold: getConfidenceThreshold
+  getDynamicThreshold: getConfidenceThreshold,
+  getLearningDiagnostics
 };
 

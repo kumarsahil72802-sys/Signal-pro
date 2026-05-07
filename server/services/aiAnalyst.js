@@ -1,5 +1,15 @@
 const { analyzePerformance } = require('./aiLearning');
-const { askGroq } = require('./groqService');
+const { askGroqWithMeta } = require('./groqService');
+const { settings } = require('./signalEngine/config');
+
+const {
+  SIGNAL_AI_MODE,
+  SIGNAL_AI_ENRICHMENT_TIMING,
+  SIGNAL_AI_RETRY_COUNT,
+  SIGNAL_AI_RETRY_BACKOFF_MS,
+  SIGNAL_AI_TIMEOUT_MS,
+  SIGNAL_AI_TRIGGER_MIN_CONFIDENCE
+} = settings;
 
 /**
  * AI Analyst Layer for signal evaluation and decision making.
@@ -75,6 +85,7 @@ ReasonExecution: ${formatValue(reason.execution)}
 ReasonSlippageRisk: ${formatValue(reason.slippageRisk)}
 VolumeConfirmed: ${formatValue(reason.volumeConfirmed)}
 DeltaRatio: ${formatValue(reason.deltaRatio)}
+NewsSummary: ${formatValue(signal.newsSummary || reason.sentiment)}
 ConfidenceBreakdownTechnical: ${formatValue(breakdown.technical)}
 ConfidenceBreakdownMarket: ${formatValue(breakdown.market)}
 ConfidenceBreakdownSentiment: ${formatValue(breakdown.sentiment)}
@@ -267,11 +278,83 @@ function analyzeSignal(signal) {
   };
 }
 
-async function enhancedAnalyze(signal) {
+function buildPerformanceContext(perf, signal) {
+  if (!perf || !signal) return 'N/A';
+  const trigger = String(signal.trigger || 'UNKNOWN').toUpperCase();
+  const symbol = String(signal.coin || '').toUpperCase();
+
+  const triggerPerf = perf.triggerStats?.[trigger];
+  const triggerWin = Number(triggerPerf?.win || 0);
+  const triggerLoss = Number(triggerPerf?.loss || 0);
+  const triggerTotal = triggerWin + triggerLoss;
+  const triggerRate = triggerTotal > 0 ? ((triggerWin / triggerTotal) * 100).toFixed(1) : 'N/A';
+
+  const symbolPerf = perf.triggerSymbolStats?.[trigger]?.[symbol];
+  const symbolWin = Number(symbolPerf?.win || 0);
+  const symbolLoss = Number(symbolPerf?.loss || 0);
+  const symbolTotal = symbolWin + symbolLoss;
+  const symbolRate = symbolTotal > 0 ? ((symbolWin / symbolTotal) * 100).toFixed(1) : 'N/A';
+
+  return `Trigger(${trigger}) W/L:${triggerWin}/${triggerLoss} WinRate:${triggerRate}% | Coin+Trigger(${symbol}) W/L:${symbolWin}/${symbolLoss} WinRate:${symbolRate}%`;
+}
+
+function buildEnrichmentPrompt(analyzed, fullRiskContext, performanceContext) {
+  return `You are a crypto trading signal evaluator.
+Return ONLY valid JSON with this exact shape:
+{"confidence_percent": <integer 0-100>, "risk_note": "<max 40 words>"}
+
+Rules:
+- confidence_percent must be an integer between 0 and 100.
+- risk_note must be concise and practical.
+- No markdown. No extra keys. No explanation outside JSON.
+
+Recent Strategy Performance:
+${performanceContext}
+
+Full Signal Context:
+${fullRiskContext}`;
+}
+
+function parseAiEnrichmentPayload(rawText) {
+  if (!rawText) return null;
+  const text = String(rawText).trim();
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch (_error) {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+    try {
+      parsed = JSON.parse(jsonMatch[0]);
+    } catch (_nestedError) {
+      return null;
+    }
+  }
+
+  if (!parsed || typeof parsed !== 'object') return null;
+
+  const confidence = parseAiConfidenceScore(parsed.confidence_percent);
+  const riskNote = typeof parsed.risk_note === 'string' ? parsed.risk_note.trim() : '';
+
+  return {
+    confidence,
+    riskNote
+  };
+}
+
+async function enhancedAnalyze(signal, runtime = {}) {
   const analyzed = analyzeSignal(signal);
   if (!analyzed) return null;
 
-  const perf = await analyzePerformance();
+  const analyzePerformanceFn = typeof runtime.analyzePerformance === 'function'
+    ? runtime.analyzePerformance
+    : analyzePerformance;
+  const askGroqWithMetaFn = typeof runtime.askGroqWithMeta === 'function'
+    ? runtime.askGroqWithMeta
+    : askGroqWithMeta;
+
+  const perf = await analyzePerformanceFn();
   if (perf) {
     const trigger = String(analyzed.trigger || 'UNKNOWN').toUpperCase();
     const symbol = String(analyzed.coin || '').toUpperCase();
@@ -311,6 +394,18 @@ async function enhancedAnalyze(signal) {
 
   analyzed.aiScore = clampScore(analyzed.aiScore);
   analyzed.aiDecision = deriveDecision(analyzed.aiScore, analyzed.blockedByLiquidity === true);
+  analyzed.aiStatus = 'SKIPPED';
+  analyzed.aiAttempts = 0;
+  analyzed.aiError = null;
+
+  const machineConfidence = Number(analyzed.confidence);
+  if (!Number.isFinite(machineConfidence) || machineConfidence < SIGNAL_AI_TRIGGER_MIN_CONFIDENCE) {
+    analyzed.aiConfidence = Number.isFinite(machineConfidence) ? machineConfidence : (analyzed.aiScore ?? null);
+    analyzed.groqInsight = '';
+    analyzed.aiStatus = 'SKIPPED';
+    analyzed.aiError = 'below_ai_trigger_confidence';
+    return analyzed;
+  }
 
   const macroSummary = analyzed.macroTrends
     ? `DXY:${analyzed.macroTrends.dxy?.trend ?? 'N/A'} (${Number(analyzed.macroTrends.dxy?.changePct || 0).toFixed(2)}%), SP500:${analyzed.macroTrends.sp500?.trend ?? 'N/A'} (${Number(analyzed.macroTrends.sp500?.changePct || 0).toFixed(2)}%)`
@@ -320,44 +415,52 @@ async function enhancedAnalyze(signal) {
     ? `Bid/Ask Ratio:${Number(analyzed.orderBookLiquidity.bidAskVolumeRatio || 0).toFixed(2)}, AskWall:${analyzed.orderBookLiquidity.massiveAskWallDetected ? 'YES' : 'NO'}, Blocked:${analyzed.orderBookLiquidity.blockedByLiquidity ? 'YES' : 'NO'}`
     : 'N/A';
 
-  const numericConfidencePrompt = `You are scoring trade quality probability.
-Return ONLY one integer from 0 to 100.
-No words. No symbols. No explanation.
+  const fullRiskContext = buildRiskContext(analyzed, macroSummary, orderBookSummary);
+  const performanceContext = buildPerformanceContext(perf, analyzed);
+  const enrichmentPrompt = buildEnrichmentPrompt(analyzed, fullRiskContext, performanceContext);
 
-Signal:
-Coin: ${analyzed.coin}
-Type: ${analyzed.type}
-MachineConfidence: ${analyzed.confidence}
-Trigger: ${analyzed.trigger}
-RSI: ${analyzed.rsi ?? 'N/A'}
-BTCTrend: ${analyzed.btcTrend ?? 'N/A'}
-VolumeSpike: ${analyzed.volumeSpike ? 'YES' : 'NO'}
-Macro: ${macroSummary}
-OrderBook: ${orderBookSummary}
-RuleAIHeuristicScore: ${analyzed.aiScore}`;
-
-  try {
-    const grokScoreRaw = await askGroq(numericConfidencePrompt, null);
-    const parsedScore = parseAiConfidenceScore(grokScoreRaw);
-    analyzed.aiConfidence = parsedScore ?? analyzed.aiScore ?? null;
-  } catch (e) {
-    analyzed.aiConfidence = analyzed.aiScore ?? null;
+  const shouldRunSyncEnrichment = SIGNAL_AI_ENRICHMENT_TIMING === 'SYNC';
+  if (!shouldRunSyncEnrichment) {
+    analyzed.aiConfidence = analyzed.confidence ?? analyzed.aiScore ?? null;
+    analyzed.groqInsight = '';
+    analyzed.aiStatus = 'SKIPPED';
+    analyzed.aiError = 'sync_enrichment_disabled';
+    return analyzed;
   }
 
-  try {
-    const fullRiskContext = buildRiskContext(analyzed, macroSummary, orderBookSummary);
-    const prompt = `You are a crypto trading risk analyst.
-Using the full signal context, respond in exactly 2 short sentences:
-Sentence 1: why this setup may work.
-Sentence 2: biggest downside risk.
-Keep it practical and under 50 words total.
+  const fallbackConfidence = analyzed.confidence ?? analyzed.aiScore ?? null;
+  const fallbackInsight = 'AI enrichment fallback: machine signal kept as source of truth.';
+  const aiRequest = await askGroqWithMetaFn(enrichmentPrompt, null, {
+    retryCount: SIGNAL_AI_RETRY_COUNT,
+    retryBackoffMs: SIGNAL_AI_RETRY_BACKOFF_MS,
+    timeoutMs: SIGNAL_AI_TIMEOUT_MS
+  });
 
-Full Signal Context:
-${fullRiskContext}`;
-    analyzed.groqInsight = await askGroq(prompt, 'No AI insight available.');
-  } catch (e) { analyzed.groqInsight = 'No AI insight available.'; }
+  analyzed.aiAttempts = aiRequest.attempts || 0;
+
+  const parsedEnrichment = parseAiEnrichmentPayload(aiRequest.text);
+  if (parsedEnrichment?.confidence != null) {
+    analyzed.aiConfidence = parsedEnrichment.confidence;
+    analyzed.groqInsight = parsedEnrichment.riskNote || fallbackInsight;
+    analyzed.aiStatus = 'SUCCESS';
+    analyzed.aiError = null;
+  } else {
+    analyzed.aiConfidence = fallbackConfidence;
+    analyzed.groqInsight = fallbackInsight;
+    analyzed.aiStatus = 'FALLBACK';
+    analyzed.aiError = aiRequest.error || 'invalid_ai_response_payload';
+  }
+
+  if (SIGNAL_AI_MODE !== 'ADVISORY') {
+    analyzed.aiMessage = `${analyzed.aiMessage || ''} | AI mode:${SIGNAL_AI_MODE} not fully enabled; running advisory behavior.`.trim();
+  }
 
   return analyzed;
 }
 
-module.exports = { enhancedAnalyze };
+module.exports = {
+  enhancedAnalyze,
+  parseAiEnrichmentPayload,
+  buildEnrichmentPrompt,
+  buildPerformanceContext
+};

@@ -23,7 +23,9 @@ const {
   getEngineStartTime,
   setEngineStartTime,
   isEngineTickInProgress,
-  setEngineTickInProgress
+  setEngineTickInProgress,
+  getLearningDiagnostics,
+  setLearningDiagnostics
 } = require('./configParts/runtimeState');
 
 module.exports = {
@@ -47,5 +49,7 @@ module.exports = {
   getEngineStartTime,
   setEngineStartTime,
   isEngineTickInProgress,
-  setEngineTickInProgress
+  setEngineTickInProgress,
+  getLearningDiagnostics,
+  setLearningDiagnostics
 };

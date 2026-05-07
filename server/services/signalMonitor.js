@@ -8,12 +8,15 @@ const { settings } = require('./signalEngine/config');
 const OUTCOME_CLEANUP_TTL_MS = 8 * 60 * 60 * 1000;
 const {
   SIGNAL_VALIDITY_MS,
-  SIGNAL_RECONCILE_ON_MONITOR
+  SIGNAL_RECONCILE_ON_MONITOR,
+  SIGNAL_MONITOR_INTERVAL_MS,
+  SIGNAL_RECONCILE_MIN_INTERVAL_MS
 } = settings;
 
 // Monitor status for health endpoint
 let monitorRunning = false;
 let lastMonitorRun = null;
+let lastReconcileRunAt = 0;
 
 function isTargetHit(signal, livePrice) {
   return (signal.type === 'BUY' && livePrice >= signal.target) ||
@@ -157,16 +160,26 @@ async function monitorSignals() {
   try {
     console.log('[MONITOR] Checking active signals...');
     lastMonitorRun = new Date();
+    const nowMs = Date.now();
 
     if (SIGNAL_RECONCILE_ON_MONITOR) {
-      const replaySummary = await reconcileSignalsForDowntime(Date.now());
-      if (replaySummary.replayAttempted || replaySummary.initialized) {
-        console.log(
-          `[MONITOR][REPLAY] reason:${replaySummary.reason} | gapMin:${(replaySummary.gapMs / 60000).toFixed(1)} | ` +
-          `scanned:${replaySummary.unresolvedScanned} | reconciled:${replaySummary.reconciledSignals} | ` +
-          `closed:${replaySummary.closedCount} | targetHit:${replaySummary.targetHitCount} | expired:${replaySummary.expiredCount} | ` +
-          `ambiguous:${replaySummary.ambiguousCount} | failed:${replaySummary.failedSignals} | checkpointUpdated:${replaySummary.checkpointUpdated ? 'YES' : 'NO'}`
-        );
+      const elapsedSinceReconcile = nowMs - lastReconcileRunAt;
+      const shouldRunReconcile = !lastReconcileRunAt || elapsedSinceReconcile >= SIGNAL_RECONCILE_MIN_INTERVAL_MS;
+
+      if (shouldRunReconcile) {
+        const replaySummary = await reconcileSignalsForDowntime(nowMs);
+        lastReconcileRunAt = nowMs;
+        if (replaySummary.replayAttempted || replaySummary.initialized) {
+          console.log(
+            `[MONITOR][REPLAY] reason:${replaySummary.reason} | gapMin:${(replaySummary.gapMs / 60000).toFixed(1)} | ` +
+            `scanned:${replaySummary.unresolvedScanned} | reconciled:${replaySummary.reconciledSignals} | ` +
+            `closed:${replaySummary.closedCount} | targetHit:${replaySummary.targetHitCount} | expired:${replaySummary.expiredCount} | ` +
+            `ambiguous:${replaySummary.ambiguousCount} | failed:${replaySummary.failedSignals} | checkpointUpdated:${replaySummary.checkpointUpdated ? 'YES' : 'NO'}`
+          );
+        }
+      } else {
+        const remainingMs = SIGNAL_RECONCILE_MIN_INTERVAL_MS - elapsedSinceReconcile;
+        console.log(`[MONITOR][REPLAY] skipped (cooldown ${Math.ceil(remainingMs / 1000)}s remaining)`);
       }
     }
 
@@ -183,8 +196,6 @@ async function monitorSignals() {
     let targetHitCount = 0;
     let expiredCount = 0;
     const processedIds = new Set();
-    const nowMs = Date.now();
-
     // Pass 1: time-based expiry.
     for (const signal of signals) {
       await ensureSignalValidityWindow(signal);
@@ -251,8 +262,10 @@ async function monitorSignals() {
 function startSignalMonitor() {
   monitorRunning = true;
   monitorSignals();
-  setInterval(monitorSignals, 5 * 60 * 1000);
-  console.log('[MONITOR] Started. Running every 5 minutes.');
+  setInterval(monitorSignals, SIGNAL_MONITOR_INTERVAL_MS);
+  console.log(
+    `[MONITOR] Started. Tick:${Math.round(SIGNAL_MONITOR_INTERVAL_MS / 1000)}s | ReplayCooldown:${Math.round(SIGNAL_RECONCILE_MIN_INTERVAL_MS / 1000)}s.`
+  );
 }
 
 function getMonitorStatus() {

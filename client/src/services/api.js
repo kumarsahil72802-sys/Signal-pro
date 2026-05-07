@@ -25,8 +25,6 @@ export const getSignals = () => api.get("/signals/all");
 
 export const takeSignal = (id) => api.patch(`/signals/${id}/take`);
 
-export const missSignal = (id) => api.patch(`/signals/${id}/miss`);
-
 export const getMarketData = (limit = 100) => api.get("/market", { params: { limit } });
 export const getMarketQuality = (symbols = []) => {
   const normalizedSymbols = Array.isArray(symbols)

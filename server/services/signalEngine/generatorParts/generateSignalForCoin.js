@@ -5,9 +5,13 @@ const Signal = require('../../../models/Signal');
 const { enhancedAnalyze } = require('../../aiAnalyst');
 const { getMacroTrendSnapshot } = require('../../macroService');
 const {
+  analyzePerformance,
+  buildSegmentKey,
+  getSegmentAdaptiveAdjustment
+} = require('../../aiLearning');
+const {
   settings,
-  lastSignalTimes,
-  getEffectiveConfidenceThreshold
+  lastSignalTimes
 } = require('../config');
 const {
   calculateEMA,
@@ -38,6 +42,7 @@ const {
   getTrendStrengthLevel,
   calcWeakIndicatorPenalty,
   calcNewsSentiment,
+  calculateSentimentAdjustment,
   calculateATR
 } = require('../analysis');
 const {
@@ -48,6 +53,7 @@ const {
   applyExecutionQualityAdjustment
 } = require('./core');
 const { getOrderBookLiquidityForSignal } = require('./orderBook');
+const { applyGuardrailPenalties } = require('./guardrails');
 
 const {
   COOLDOWN_MS,
@@ -61,8 +67,13 @@ const {
   SIGNAL_USE_EXECUTION_QUALITY,
   SIGNAL_LIQUIDITY_REJECT_MODE,
   SIGNAL_AI_REJECT_MODE,
-  SIGNAL_VALIDITY_MS
+  SIGNAL_VALIDITY_MS,
+  SIGNAL_MACHINE_VERSION
 } = settings;
+
+function clampConfidence(value) {
+  return Math.max(0, Math.min(100, value));
+}
 
 async function canRunForCoin(coin) {
   const activeSignal = await Signal.findOne({ coin, status: 'ACTIVE' });
@@ -290,26 +301,15 @@ function passQualityGate(coin, confidence, volumeData, momentum, phase = '') {
   return { passed: true, signalQuality };
 }
 
-function applyAiDecisionModes(coin, adjustedSignal, confidence) {
+function applyAiDecisionModes(adjustedSignal) {
+  if (!adjustedSignal) return null;
+
   if (adjustedSignal.blockedByLiquidity) {
-    const effectiveThreshold = getEffectiveConfidenceThreshold();
-    const softGate = effectiveThreshold + 8;
-    if (SIGNAL_LIQUIDITY_REJECT_MODE === 'HARD') return null;
-    if (SIGNAL_LIQUIDITY_REJECT_MODE === 'SOFT' && confidence < softGate) return null;
-    adjustedSignal.aiDecision = 'WEAK_APPROVE';
-    adjustedSignal.aiMessage = `${adjustedSignal.aiMessage || ''} | Liquidity block overridden by mode:${SIGNAL_LIQUIDITY_REJECT_MODE}`.trim();
+    adjustedSignal.aiMessage = `${adjustedSignal.aiMessage || ''} | Liquidity caution advisory (${SIGNAL_LIQUIDITY_REJECT_MODE})`.trim();
   }
 
   if (adjustedSignal.aiDecision === 'REJECT') {
-    const normalizedAiRejectMode = SIGNAL_AI_REJECT_MODE === 'OFF' ? 'OFF' : 'HARD';
-    if (normalizedAiRejectMode !== 'OFF') {
-      return null;
-    }
-
-    const effectiveThreshold = getEffectiveConfidenceThreshold();
-    if (confidence < effectiveThreshold + 12) return null;
-    adjustedSignal.aiDecision = 'WEAK_APPROVE';
-    adjustedSignal.aiMessage = `${adjustedSignal.aiMessage || ''} | AI reject override enabled via mode:OFF (high-confidence bypass)`.trim();
+    adjustedSignal.aiMessage = `${adjustedSignal.aiMessage || ''} | AI reject kept as advisory (${SIGNAL_AI_REJECT_MODE})`.trim();
   }
 
   return adjustedSignal;
@@ -428,10 +428,23 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
     trend: getTrendStrengthLevel(advancedSignal, currentPrice)
   });
 
-  let confidence = Math.max(0, Math.min(100, baseConfidence + confidenceBoost + confidencePenalty + weakPenalty + volumeDeltaPenalty + btcConfidencePenalty));
-  const sentimentScore = await calcNewsSentiment(coin);
-  const sentimentConfidenceAdjustment = sentimentScore > 0.3 ? 3 : sentimentScore < -0.3 ? -3 : 0;
-  confidence = Math.max(0, Math.min(100, confidence + sentimentConfidenceAdjustment));
+  let confidence = clampConfidence(baseConfidence + confidenceBoost + confidencePenalty + weakPenalty + volumeDeltaPenalty + btcConfidencePenalty);
+
+  const sentimentResult = await calcNewsSentiment(coin, { trend });
+  const sentimentScore = Number(sentimentResult?.score || 0);
+  const sentimentDirectionalScore = Number(sentimentResult?.directionalScore || 0);
+  const sentimentConfidenceAdjustment = calculateSentimentAdjustment(sentimentDirectionalScore);
+  confidence = clampConfidence(confidence + sentimentConfidenceAdjustment);
+
+  const guardrailDecision = applyGuardrailPenalties({
+    trend,
+    btcTrend,
+    higherTimeframeTrend,
+    orderBookLiquidity,
+    executionQualityData: null,
+    macroTrends
+  });
+  confidence = clampConfidence(confidence + guardrailDecision.penalty);
 
   const initialGate = passQualityGate(coin, confidence, volumeData, momentum);
   if (!initialGate.passed) return null;
@@ -444,6 +457,26 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   if (execution.blocked) return null;
   confidence = execution.confidence;
 
+  const postExecutionGuardrail = applyGuardrailPenalties({
+    trend,
+    btcTrend,
+    higherTimeframeTrend,
+    orderBookLiquidity,
+    executionQualityData: execution.executionQualityData,
+    macroTrends
+  });
+  confidence = clampConfidence(confidence + postExecutionGuardrail.penalty);
+
+  const segmentKey = buildSegmentKey({
+    trigger,
+    regime,
+    symbol: coin,
+    confidence
+  });
+  const learningPerformance = await analyzePerformance();
+  const segmentAdjustment = getSegmentAdaptiveAdjustment(learningPerformance, segmentKey);
+  confidence = clampConfidence(confidence + segmentAdjustment.adjustment);
+
   const finalGate = passQualityGate(coin, confidence, volumeData, momentum, 'Final ');
   if (!finalGate.passed) return null;
   const signalQuality = finalGate.signalQuality;
@@ -453,6 +486,23 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   signalData.validUntil = new Date(Date.now() + SIGNAL_VALIDITY_MS);
   signalData.confidence = confidence;
   signalData.sentimentScore = sentimentScore;
+  signalData.newsSummary = `Sentiment:${sentimentScore.toFixed(3)} (${sentimentResult?.label || 'NEUTRAL'})`;
+  signalData.sentimentBreakdown = {
+    status: sentimentResult?.status || 'FALLBACK',
+    source: sentimentResult?.source || 'fallback_neutral',
+    directionalScore: Number.isFinite(sentimentDirectionalScore) ? Number(sentimentDirectionalScore.toFixed(4)) : 0,
+    adjustment: sentimentConfidenceAdjustment,
+    articleCount: Number(sentimentResult?.breakdown?.articleCount || 0),
+    articleBias: Number(sentimentResult?.breakdown?.articleBias || 0),
+    macroBias: Number(sentimentResult?.breakdown?.macroBias || 0)
+  };
+  signalData.machineVersion = SIGNAL_MACHINE_VERSION;
+  signalData.segmentKey = segmentKey;
+  signalData.guardrailFlags = [...new Set([
+    ...guardrailDecision.flags,
+    ...postExecutionGuardrail.flags,
+    ...(segmentAdjustment.applied ? [`SEGMENT:${segmentAdjustment.reason}`] : [])
+  ])];
   signalData.signalQuality = signalQuality;
   signalData.macroTrends = macroTrends;
   signalData.orderBookLiquidity = orderBookLiquidity;
@@ -460,8 +510,17 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
     technical: Math.round(technicalScore * 0.7),
     market: normalizedMarketScore,
     sentiment: sentimentScore,
-    bonus: confidenceBoost + (sentimentConfidenceAdjustment > 0 ? sentimentConfidenceAdjustment : 0),
-    penalty: confidencePenalty + weakPenalty + volumeDeltaPenalty + btcConfidencePenalty + fourH.fourHPenalty + execution.executionAdjustment + (sentimentConfidenceAdjustment < 0 ? sentimentConfidenceAdjustment : 0)
+    bonus: confidenceBoost + (sentimentConfidenceAdjustment > 0 ? sentimentConfidenceAdjustment : 0) + (segmentAdjustment.adjustment > 0 ? segmentAdjustment.adjustment : 0),
+    penalty: confidencePenalty
+      + weakPenalty
+      + volumeDeltaPenalty
+      + btcConfidencePenalty
+      + fourH.fourHPenalty
+      + execution.executionAdjustment
+      + (sentimentConfidenceAdjustment < 0 ? sentimentConfidenceAdjustment : 0)
+      + guardrailDecision.penalty
+      + postExecutionGuardrail.penalty
+      + (segmentAdjustment.adjustment < 0 ? segmentAdjustment.adjustment : 0)
   };
 
   const reasons = getReasonLabels(advancedSignal, momentum, volumeData, rsi);
@@ -469,8 +528,10 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   reasons.macd = macdData && macdData.histogram > 0 ? 'BULLISH' : macdData && macdData.histogram < 0 ? 'BEARISH' : 'NEUTRAL';
   reasons.deltaRatio = volumeDelta.deltaRatio.toFixed(2);
   reasons.volumeConfirmed = volumeDelta.buyDominant ? 'BUY_DOMINANT' : volumeDelta.sellDominant ? 'SELL_DOMINANT' : 'NEUTRAL';
+  reasons.sentiment = sentimentScore > 0.3 ? 'BULLISH' : sentimentScore < -0.3 ? 'BEARISH' : 'NEUTRAL';
   reasons.execution = execution.executionQualityData?.executionQuality || 'UNKNOWN';
   reasons.slippageRisk = execution.executionQualityData?.slippageRisk || 'UNKNOWN';
+  reasons.segment = segmentAdjustment.reason || 'neutral_segment';
   if (orderBookLiquidity) reasons.execution = `${reasons.execution} | OB_R:${orderBookLiquidity.bidAskVolumeRatio.toFixed(2)}`;
   signalData.reason = reasons;
   signalData.trigger = trigger;
@@ -491,7 +552,7 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
 
   const adjustedSignal = await enhancedAnalyze(signalToAdjust);
   if (!adjustedSignal) return null;
-  const finalAdjusted = applyAiDecisionModes(coin, adjustedSignal, confidence);
+  const finalAdjusted = applyAiDecisionModes(adjustedSignal);
   if (!finalAdjusted) return null;
 
   // `aiScore` remains internal rule+history heuristic, `aiConfidence` stores Grok probability score.
@@ -500,6 +561,9 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   signalData.aiDecision = finalAdjusted.aiDecision;
   signalData.aiMessage = finalAdjusted.aiMessage;
   signalData.groqInsight = finalAdjusted.groqInsight ?? '';
+  signalData.aiStatus = finalAdjusted.aiStatus || 'SKIPPED';
+  signalData.aiAttempts = Number.isFinite(Number(finalAdjusted.aiAttempts)) ? Number(finalAdjusted.aiAttempts) : 0;
+  signalData.aiError = finalAdjusted.aiError || null;
 
   const savedSignal = new Signal(signalData);
   await savedSignal.save();

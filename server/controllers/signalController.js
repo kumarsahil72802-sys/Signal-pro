@@ -1,5 +1,7 @@
 const Signal = require('../models/Signal');
 const { settings } = require('../services/signalEngine/config');
+const { buildWinrateDiagnostics } = require('../services/winrateDiagnosticsService');
+const { analyzePerformance } = require('../services/aiLearning');
 
 const { SIGNAL_VALIDITY_MS } = settings;
 
@@ -179,6 +181,11 @@ const missSignal = async (req, res) => {
  */
 const getStats = async (req, res) => {
   try {
+    const [performanceSummary, winrateDiagnostics] = await Promise.all([
+      analyzePerformance(),
+      buildWinrateDiagnostics()
+    ]);
+
     // Get total count of all signals ever generated
     const totalGenerated = await Signal.countDocuments();
 
@@ -319,7 +326,13 @@ const getStats = async (req, res) => {
       totalExpired,
       totalGenerated,
       missedRate: Math.round(missedRate * 10) / 10,
-      takenRate: Math.round(takenRate * 10) / 10
+      takenRate: Math.round(takenRate * 10) / 10,
+      baselineWinRate: winrateDiagnostics.baselineWinRate,
+      deltaWinRate: winrateDiagnostics.deltaWinRate,
+      rollingSampleSize: winrateDiagnostics.rollingSampleSize,
+      coverage: winrateDiagnostics.coverage,
+      segmentHealthSummary: performanceSummary?.segmentHealthSummary || null,
+      sentimentEngineStatus: settings.SIGNAL_SENTIMENT_ENABLED ? 'ENABLED' : 'DISABLED'
     });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });

@@ -1,4 +1,5 @@
 const TradeLog = require('../models/TradeLog');
+const { resolveConfidenceBand } = require('./aiLearning');
 
 async function logTrade(signal, result, exitPrice) {
   try {
@@ -9,9 +10,12 @@ async function logTrade(signal, result, exitPrice) {
       exitPrice,
       result,
       confidence: signal.confidence,
+      confidenceBand: resolveConfidenceBand(signal.confidence),
       aiScore: signal.aiScore,
       regime: signal.regime,
-      trigger: signal.trigger
+      trigger: signal.trigger,
+      segmentKey: signal.segmentKey || null,
+      machineVersion: signal.machineVersion || null
     });
     await trade.save();
     console.log(`[TRADE] Logged ${signal.coin} ${signal.type} → ${result}`);

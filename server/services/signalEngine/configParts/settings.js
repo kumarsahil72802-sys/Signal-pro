@@ -6,6 +6,18 @@ function parseBooleanEnv(value, fallback) {
   return fallback;
 }
 
+function parseNumberEnv(value, fallback) {
+  if (value == null || value === '') return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parseEnumEnv(value, allowedValues, fallback) {
+  if (value == null || value === '') return fallback;
+  const normalized = String(value).trim().toUpperCase();
+  return allowedValues.includes(normalized) ? normalized : fallback;
+}
+
 const SIGNAL_PROFILE = (process.env.SIGNAL_PROFILE || 'BALANCED').trim().toUpperCase();
 const PROFILE_PRESETS = {
   STRICT: {
@@ -83,6 +95,14 @@ const SIGNAL_USE_4H_HARD_FILTER = parseBooleanEnv(
   PROFILE_CONFIG.use4hHardFilter
 );
 const SIGNAL_AI_REJECT_MODE = (process.env.SIGNAL_AI_REJECT_MODE || PROFILE_CONFIG.aiRejectMode).trim().toUpperCase();
+const SIGNAL_AI_MODE = parseEnumEnv(process.env.SIGNAL_AI_MODE, ['ADVISORY', 'GATED'], 'ADVISORY');
+const SIGNAL_AI_ENRICHMENT_TIMING = parseEnumEnv(process.env.SIGNAL_AI_ENRICHMENT_TIMING, ['SYNC', 'ASYNC'], 'SYNC');
+const SIGNAL_AI_RETRY_COUNT = Math.max(0, Math.min(5, parseNumberEnv(process.env.SIGNAL_AI_RETRY_COUNT, 2)));
+const SIGNAL_AI_RETRY_BACKOFF_MS = Math.max(250, parseNumberEnv(process.env.SIGNAL_AI_RETRY_BACKOFF_MS, 1500));
+const SIGNAL_AI_TIMEOUT_MS = Math.max(1000, parseNumberEnv(process.env.SIGNAL_AI_TIMEOUT_MS, 10000));
+const SIGNAL_AI_TRIGGER_MIN_CONFIDENCE = Math.max(0, Math.min(100, parseNumberEnv(process.env.SIGNAL_AI_TRIGGER_MIN_CONFIDENCE, 60)));
+const SIGNAL_AI_429_COOLDOWN_MS = Math.max(60 * 1000, parseNumberEnv(process.env.SIGNAL_AI_429_COOLDOWN_MS, 15 * 60 * 1000));
+const SIGNAL_MACHINE_VERSION = (process.env.SIGNAL_MACHINE_VERSION || 'winrate_v1').trim();
 const SIGNAL_LIQUIDITY_REJECT_MODE = (process.env.SIGNAL_LIQUIDITY_REJECT_MODE || PROFILE_CONFIG.liquidityRejectMode || 'SOFT').trim().toUpperCase();
 const SIGNAL_DEPTH_LIMIT = Math.min(1000, Math.max(20, Number(process.env.SIGNAL_DEPTH_LIMIT || 100)));
 const SIGNAL_ORDERBOOK_RANGE_PCT = Math.max(0.2, Number(process.env.SIGNAL_ORDERBOOK_RANGE_PCT || 1.5));
@@ -129,7 +149,9 @@ const TRADABLE_SYMBOL_FETCH_LIMIT = 1500;
 const INTERVAL = process.env.SIGNAL_INTERVAL || '1h';
 const CANDLE_COUNT = 100;
 const TREND_CANDLES = 22;
-const CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const CHECK_INTERVAL_MS = Math.max(30 * 1000, parseNumberEnv(process.env.SIGNAL_CHECK_INTERVAL_MS, 60 * 1000));
+const SIGNAL_MONITOR_INTERVAL_MS = Math.max(15 * 1000, parseNumberEnv(process.env.SIGNAL_MONITOR_INTERVAL_MS, 60 * 1000));
+const SIGNAL_RECONCILE_MIN_INTERVAL_MS = Math.max(60 * 1000, parseNumberEnv(process.env.SIGNAL_RECONCILE_MIN_INTERVAL_MS, 5 * 60 * 1000));
 const CONFIDENCE_THRESHOLD_KEY = 'confidence_threshold';
 const DEFAULT_MIN_CONFIDENCE = 60;
 const MIN_MOMENTUM_PCT = 0.7;
@@ -147,6 +169,12 @@ const SIGNAL_REPLAY_RETRY_COUNT = Math.max(0, Math.min(5, Number(process.env.SIG
 const SIGNAL_REPLAY_AMBIGUITY_POLICY = (process.env.SIGNAL_REPLAY_AMBIGUITY_POLICY || 'CONSERVATIVE').trim().toUpperCase();
 const SIGNAL_RECONCILE_ON_MONITOR = parseBooleanEnv(process.env.SIGNAL_RECONCILE_ON_MONITOR, true);
 const SIGNAL_MONITOR_CHECKPOINT_KEY = (process.env.SIGNAL_MONITOR_CHECKPOINT_KEY || 'signal_monitor_checkpoint_ms').trim();
+const SIGNAL_WINRATE_BASELINE_WINDOW = Math.max(50, Math.min(400, parseNumberEnv(process.env.SIGNAL_WINRATE_BASELINE_WINDOW, 200)));
+const SIGNAL_WINRATE_BASELINE_MIN_SAMPLE = Math.max(30, Math.min(SIGNAL_WINRATE_BASELINE_WINDOW, parseNumberEnv(process.env.SIGNAL_WINRATE_BASELINE_MIN_SAMPLE, 120)));
+const SIGNAL_SEGMENT_MIN_SAMPLE = Math.max(6, Math.min(60, parseNumberEnv(process.env.SIGNAL_SEGMENT_MIN_SAMPLE, 10)));
+const SIGNAL_SEGMENT_COOLDOWN_MINUTES = Math.max(10, parseNumberEnv(process.env.SIGNAL_SEGMENT_COOLDOWN_MINUTES, 180));
+const SIGNAL_SENTIMENT_NEWS_LIMIT = Math.max(5, Math.min(20, parseNumberEnv(process.env.SIGNAL_SENTIMENT_NEWS_LIMIT, 12)));
+const SIGNAL_SENTIMENT_ENABLED = parseBooleanEnv(process.env.SIGNAL_SENTIMENT_ENABLED, true);
 
 const STABLE_BASE_ASSETS = new Set([
   'USDT', 'USDC', 'BUSD', 'FDUSD', 'TUSD', 'USDP', 'DAI', 'USDE', 'USD1', 'PYUSD'
@@ -167,6 +195,14 @@ const settings = {
   SIGNAL_USE_BTC_HARD_BLOCK,
   SIGNAL_USE_4H_HARD_FILTER,
   SIGNAL_AI_REJECT_MODE,
+  SIGNAL_AI_MODE,
+  SIGNAL_AI_ENRICHMENT_TIMING,
+  SIGNAL_AI_RETRY_COUNT,
+  SIGNAL_AI_RETRY_BACKOFF_MS,
+  SIGNAL_AI_TIMEOUT_MS,
+  SIGNAL_AI_TRIGGER_MIN_CONFIDENCE,
+  SIGNAL_AI_429_COOLDOWN_MS,
+  SIGNAL_MACHINE_VERSION,
   SIGNAL_LIQUIDITY_REJECT_MODE,
   SIGNAL_DEPTH_LIMIT,
   SIGNAL_ORDERBOOK_RANGE_PCT,
@@ -186,6 +222,8 @@ const settings = {
   CANDLE_COUNT,
   TREND_CANDLES,
   CHECK_INTERVAL_MS,
+  SIGNAL_MONITOR_INTERVAL_MS,
+  SIGNAL_RECONCILE_MIN_INTERVAL_MS,
   CONFIDENCE_THRESHOLD_KEY,
   DEFAULT_MIN_CONFIDENCE,
   MIN_MOMENTUM_PCT,
@@ -202,6 +240,12 @@ const settings = {
   SIGNAL_REPLAY_AMBIGUITY_POLICY,
   SIGNAL_RECONCILE_ON_MONITOR,
   SIGNAL_MONITOR_CHECKPOINT_KEY,
+  SIGNAL_WINRATE_BASELINE_WINDOW,
+  SIGNAL_WINRATE_BASELINE_MIN_SAMPLE,
+  SIGNAL_SEGMENT_MIN_SAMPLE,
+  SIGNAL_SEGMENT_COOLDOWN_MINUTES,
+  SIGNAL_SENTIMENT_NEWS_LIMIT,
+  SIGNAL_SENTIMENT_ENABLED,
   COOLDOWN_MS,
   STABLE_BASE_ASSETS
 };
