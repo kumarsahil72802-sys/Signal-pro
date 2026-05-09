@@ -31,18 +31,15 @@ const Stats = ({ loading }) => {
       </div>
     )
   }
-
-  if (!stats || stats.totalTaken === 0) {
-    return (
-      <div className="text-center py-12">
-        <div className="w-16 h-16 rounded-full border border-[#2a3a55] bg-[#111b2d] text-[#f0b90b] font-bold mx-auto mb-4 flex items-center justify-center">
-          PNL
-        </div>
-        <h3 className="text-lg font-medium text-white mb-2">No Performance Data Yet</h3>
-        <p className="text-[#8ea2c4]">Complete signals will appear here once they close.</p>
-      </div>
-    )
-  }
+  const safeStats = stats || {}
+  const totalGenerated = Number(safeStats.totalGenerated || safeStats.totalSignals || 0)
+  const totalTaken = Number(safeStats.totalTaken || 0)
+  const wins = Number(safeStats.wins || 0)
+  const losses = Number(safeStats.losses || 0)
+  const winRate = Number(safeStats.winRate || 0)
+  const last10 = safeStats.last10 || { total: 0, wins: 0, winRate: 0 }
+  const avgRR = Number(safeStats.avgRR || 0)
+  const bestCoin = safeStats.bestCoin || null
 
   return (
     <div>
@@ -54,64 +51,64 @@ const Stats = ({ loading }) => {
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
         <div className="bg-[#111b2d] rounded-xl border border-[#304a70] p-4">
           <p className="text-sm text-[#8ea2c4] mb-1">Total Generated</p>
-          <p className="text-2xl font-bold text-white">{stats.totalGenerated}</p>
+          <p className="text-2xl font-bold text-white">{totalGenerated}</p>
         </div>
 
         <div className="bg-[#111b2d] rounded-xl border border-[#304a70] p-4">
           <p className="text-sm text-[#8ea2c4] mb-1">Total Taken</p>
-          <p className="text-2xl font-bold text-white">{stats.totalTaken}</p>
+          <p className="text-2xl font-bold text-white">{totalTaken}</p>
         </div>
 
         <div className="bg-[#111b2d] rounded-xl border border-[#304a70] p-4">
           <p className="text-sm text-[#8ea2c4] mb-1">Wins</p>
-          <p className="text-2xl font-bold text-[#64f2b3]">{stats.wins}</p>
+          <p className="text-2xl font-bold text-[#64f2b3]">{wins}</p>
         </div>
 
         <div className="bg-[#111b2d] rounded-xl border border-[#304a70] p-4">
           <p className="text-sm text-[#8ea2c4] mb-1">Losses</p>
-          <p className="text-2xl font-bold text-[#ff8fa1]">{stats.losses}</p>
+          <p className="text-2xl font-bold text-[#ff8fa1]">{losses}</p>
         </div>
 
-        <div className={`rounded-xl border p-4 ${getWinRateTone(stats.winRate)}`}>
+        <div className={`rounded-xl border p-4 ${getWinRateTone(winRate)}`}>
           <p className="text-sm opacity-80 mb-1">Win Rate</p>
-          <p className="text-2xl font-bold">{stats.winRate}%</p>
+          <p className="text-2xl font-bold">{winRate}%</p>
         </div>
       </div>
 
-      {stats.last10 && stats.last10.total > 0 && (
+      {last10.total > 0 && (
         <div className="bg-[#111b2d] rounded-xl border border-[#2a3a55] p-4 mb-6">
           <h3 className="text-sm font-medium text-[#c3d2eb] mb-3">Last 10 Results</h3>
           <div className="flex flex-wrap gap-2">
-            {Array.from({ length: stats.last10.total }).map((_, i) => (
+            {Array.from({ length: last10.total }).map((_, i) => (
               <div
                 key={i}
                 className={`w-8 h-8 rounded flex items-center justify-center text-xs font-bold ${
-                  i < stats.last10.wins
+                  i < last10.wins
                     ? 'bg-[#173427] text-[#64f2b3]'
                     : 'bg-[#3b1b26] text-[#ff8fa1]'
                 }`}
               >
-                {i < stats.last10.wins ? 'W' : 'L'}
+                {i < last10.wins ? 'W' : 'L'}
               </div>
             ))}
           </div>
           <p className="text-sm text-[#8ea2c4] mt-3">
-            Last 10: {stats.last10.wins}W / {stats.last10.total - stats.last10.wins}L ({stats.last10.winRate}% win rate)
+            Last 10: {last10.wins}W / {last10.total - last10.wins}L ({last10.winRate}% win rate)
           </p>
         </div>
       )}
 
-      {stats.avgRR && (
+      {avgRR > 0 && (
         <div className="bg-[#111b2d] rounded-xl border border-[#2a3a55] p-4">
           <div className="grid grid-cols-2 gap-4">
             <div>
               <p className="text-sm text-[#8ea2c4]">Avg Risk:Reward</p>
-              <p className="text-lg font-semibold text-white">1:{stats.avgRR}</p>
+              <p className="text-lg font-semibold text-white">1:{avgRR}</p>
             </div>
-            {stats.bestCoin && (
+            {bestCoin && (
               <div>
                 <p className="text-sm text-[#8ea2c4]">Best Performing</p>
-                <p className="text-lg font-semibold text-[#64f2b3]">{stats.bestCoin}</p>
+                <p className="text-lg font-semibold text-[#64f2b3]">{bestCoin}</p>
               </div>
             )}
           </div>

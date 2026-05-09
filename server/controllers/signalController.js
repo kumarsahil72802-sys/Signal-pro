@@ -4,6 +4,13 @@ const { buildWinrateDiagnostics } = require('../services/winrateDiagnosticsServi
 const { analyzePerformance } = require('../services/aiLearning');
 
 const { SIGNAL_VALIDITY_MS } = settings;
+const TAKEN_OUTCOME_MATCH = {
+  status: 'CLOSED',
+  wasTaken: true,
+  result: { $in: ['TARGET_HIT', 'SL_HIT'] }
+};
+const DEFAULT_ALL_SIGNALS_LIMIT = 500;
+const MAX_ALL_SIGNALS_LIMIT = 2000;
 
 function normalizeConfidence(value) {
   if (value == null || value === '') return null;
@@ -98,7 +105,33 @@ const getActiveSignals = async (req, res) => {
 
 const getAllSignals = async (req, res) => {
   try {
-    const signals = await Signal.find().sort({ confidence: -1, createdAt: -1 });
+    const limitRaw = Number(req.query.limit);
+    const pageRaw = Number(req.query.page);
+    const isUnboundedRequest = String(req.query.all || '').trim().toLowerCase() === 'true';
+
+    const limit = isUnboundedRequest
+      ? MAX_ALL_SIGNALS_LIMIT
+      : Number.isFinite(limitRaw)
+        ? Math.max(1, Math.min(MAX_ALL_SIGNALS_LIMIT, Math.floor(limitRaw)))
+        : DEFAULT_ALL_SIGNALS_LIMIT;
+
+    const page = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
+    const skip = (page - 1) * limit;
+
+    const [signals, total] = await Promise.all([
+      Signal.find()
+        .sort({ confidence: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      Signal.countDocuments()
+    ]);
+
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+
+    res.set('X-Total-Count', String(total));
+    res.set('X-Page', String(page));
+    res.set('X-Limit', String(limit));
+    res.set('X-Total-Pages', String(totalPages));
     res.json(signals);
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
@@ -193,10 +226,7 @@ const getStats = async (req, res) => {
     // This is the ONLY set that should count toward win rate
     const stats = await Signal.aggregate([
       {
-        $match: {
-          wasTaken: true,
-          result: { $in: ['TARGET_HIT', 'SL_HIT'] }
-        }
+        $match: TAKEN_OUTCOME_MATCH
       },
       {
         $group: {
@@ -235,10 +265,7 @@ const getStats = async (req, res) => {
     });
 
     // Get last 10 TAKEN signals for recent performance
-    const last10Signals = await Signal.find({
-      wasTaken: true,
-      result: { $in: ['TARGET_HIT', 'SL_HIT'] }
-    })
+    const last10Signals = await Signal.find(TAKEN_OUTCOME_MATCH)
       .sort({ closedAt: -1 })
       .limit(10)
       .select('result coin type entryPrice target stopLoss closedAt');
@@ -250,10 +277,7 @@ const getStats = async (req, res) => {
     // Aggregate per-coin stats for TAKEN signals only
     const coinStats = await Signal.aggregate([
       {
-        $match: {
-          wasTaken: true,
-          result: { $in: ['TARGET_HIT', 'SL_HIT'] }
-        }
+        $match: TAKEN_OUTCOME_MATCH
       },
       {
         $group: {

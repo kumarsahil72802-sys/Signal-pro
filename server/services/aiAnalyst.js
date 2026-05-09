@@ -1,5 +1,6 @@
 const { analyzePerformance } = require('./aiLearning');
 const { askGroqWithMeta } = require('./groqService');
+const { askNvidiaWithMeta } = require('./nvidiaService');
 const { settings } = require('./signalEngine/config');
 
 const {
@@ -93,6 +94,12 @@ ConfidenceBreakdownBonus: ${formatValue(breakdown.bonus)}
 ConfidenceBreakdownPenalty: ${formatValue(breakdown.penalty)}
 MacroSummary: ${macroSummary}
 OrderBookSummary: ${orderBookSummary}
+FundingRate: ${formatNumber(signal.futuresData?.fundingRate, 6)}
+LongShortRatio: ${formatNumber(signal.futuresData?.longShortRatio, 3)}
+TakerBuySellRatio: ${formatNumber(signal.futuresData?.takerBuySellRatio, 3)}
+OpenInterest: ${formatNumber(signal.futuresData?.openInterest, 0)}
+TakerBuyVolume: ${formatNumber(signal.takerBuyVolume, 2)}
+NumberOfTrades: ${formatValue(signal.numberOfTrades)}
 AIHeuristicNotes: ${formatValue(signal.aiMessage)}`;
 }
 
@@ -353,6 +360,9 @@ async function enhancedAnalyze(signal, runtime = {}) {
   const askGroqWithMetaFn = typeof runtime.askGroqWithMeta === 'function'
     ? runtime.askGroqWithMeta
     : askGroqWithMeta;
+  const askNvidiaWithMetaFn = typeof runtime.askNvidiaWithMeta === 'function'
+    ? runtime.askNvidiaWithMeta
+    : askNvidiaWithMeta;
 
   const perf = await analyzePerformanceFn();
   if (perf) {
@@ -397,6 +407,11 @@ async function enhancedAnalyze(signal, runtime = {}) {
   analyzed.aiStatus = 'SKIPPED';
   analyzed.aiAttempts = 0;
   analyzed.aiError = null;
+  analyzed.nvidiaConfidence = null;
+  analyzed.nvidiaInsight = '';
+  analyzed.nvidiaStatus = 'SKIPPED';
+  analyzed.nvidiaAttempts = 0;
+  analyzed.nvidiaError = null;
 
   const machineConfidence = Number(analyzed.confidence);
   if (!Number.isFinite(machineConfidence) || machineConfidence < SIGNAL_AI_TRIGGER_MIN_CONFIDENCE) {
@@ -404,6 +419,8 @@ async function enhancedAnalyze(signal, runtime = {}) {
     analyzed.groqInsight = '';
     analyzed.aiStatus = 'SKIPPED';
     analyzed.aiError = 'below_ai_trigger_confidence';
+    analyzed.nvidiaStatus = 'SKIPPED';
+    analyzed.nvidiaError = 'below_ai_trigger_confidence';
     return analyzed;
   }
 
@@ -425,11 +442,14 @@ async function enhancedAnalyze(signal, runtime = {}) {
     analyzed.groqInsight = '';
     analyzed.aiStatus = 'SKIPPED';
     analyzed.aiError = 'sync_enrichment_disabled';
+    analyzed.nvidiaStatus = 'SKIPPED';
+    analyzed.nvidiaError = 'sync_enrichment_disabled';
     return analyzed;
   }
 
   const fallbackConfidence = analyzed.confidence ?? analyzed.aiScore ?? null;
   const fallbackInsight = 'AI enrichment fallback: machine signal kept as source of truth.';
+  const nvidiaFallbackInsight = 'NVIDIA enrichment fallback: provider response unavailable.';
   const aiRequest = await askGroqWithMetaFn(enrichmentPrompt, null, {
     retryCount: SIGNAL_AI_RETRY_COUNT,
     retryBackoffMs: SIGNAL_AI_RETRY_BACKOFF_MS,
@@ -449,6 +469,26 @@ async function enhancedAnalyze(signal, runtime = {}) {
     analyzed.groqInsight = fallbackInsight;
     analyzed.aiStatus = 'FALLBACK';
     analyzed.aiError = aiRequest.error || 'invalid_ai_response_payload';
+  }
+
+  const nvidiaRequest = await askNvidiaWithMetaFn(enrichmentPrompt, null, {
+    retryCount: SIGNAL_AI_RETRY_COUNT,
+    retryBackoffMs: SIGNAL_AI_RETRY_BACKOFF_MS,
+    timeoutMs: SIGNAL_AI_TIMEOUT_MS
+  });
+
+  analyzed.nvidiaAttempts = nvidiaRequest.attempts || 0;
+  const parsedNvidiaEnrichment = parseAiEnrichmentPayload(nvidiaRequest.text);
+  if (parsedNvidiaEnrichment?.confidence != null) {
+    analyzed.nvidiaConfidence = parsedNvidiaEnrichment.confidence;
+    analyzed.nvidiaInsight = parsedNvidiaEnrichment.riskNote || nvidiaFallbackInsight;
+    analyzed.nvidiaStatus = 'SUCCESS';
+    analyzed.nvidiaError = null;
+  } else {
+    analyzed.nvidiaConfidence = null;
+    analyzed.nvidiaInsight = nvidiaFallbackInsight;
+    analyzed.nvidiaStatus = 'FALLBACK';
+    analyzed.nvidiaError = nvidiaRequest.error || 'invalid_ai_response_payload';
   }
 
   if (SIGNAL_AI_MODE !== 'ADVISORY') {

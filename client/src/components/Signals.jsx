@@ -194,7 +194,7 @@ const TrendChart = ({ points, interval, loading, error, onIntervalChange }) => {
   )
 }
 
-const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, qualityData, qualityApiFailed }) => {
+const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, qualityData, qualityApiFailed, canTrade, onRequireAuth }) => {
   const conf = signal.confidence ?? 0
   const isActive = signal.status === 'ACTIVE'
   const isTaken = signal.status === 'TAKEN'
@@ -277,6 +277,8 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
   const lossPercent = ((signal.stopLoss - signal.entryPrice) / signal.entryPrice * 100).toFixed(2)
   const reason = signal.reason || {}
   const chartPoints = chartDataByInterval[chartInterval] || []
+  const nvidiaConfidenceValue = Number(signal.nvidiaConfidence)
+  const hasNvidiaConfidence = Number.isFinite(nvidiaConfidenceValue)
 
   return (
     <div
@@ -442,9 +444,21 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
           {signal.groqInsight && (
             <div className="mb-4 p-4 bg-[#0f1e35] border border-[#2a1e5f] rounded-xl">
               <p className="text-xs text-[#8ea2c4] uppercase tracking-wider mb-2 font-semibold flex items-center gap-2">
-                <span className="text-[#a78bfa]">🤖</span> AI Risk Assessment
+                <span className="text-[#a78bfa]">🤖</span> Grok AI
               </p>
               <p className="text-sm text-[#c8d8f0] leading-relaxed">{signal.groqInsight}</p>
+            </div>
+          )}
+
+          {signal.nvidiaInsight && (
+            <div className="mb-4 p-4 bg-[#0f1f1f] border border-[#1f5f56] rounded-xl">
+              <p className="text-xs text-[#8ea2c4] uppercase tracking-wider mb-2 font-semibold flex items-center gap-2">
+                <span className="text-[#58d7c4]">🤖</span> NVIDIA AI
+              </p>
+              <p className="text-sm text-[#c8f0eb] leading-relaxed">{signal.nvidiaInsight}</p>
+              <p className="mt-2 text-xs text-[#8ec7bf]">
+                Confidence: <span className="font-semibold text-[#d4fff8]">{hasNvidiaConfidence ? `${Math.round(nvidiaConfidenceValue)}%` : 'N/A'}</span>
+              </p>
             </div>
           )}
 
@@ -470,6 +484,10 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
               <button
                 onClick={(e) => {
                   e.stopPropagation()
+                  if (!canTrade) {
+                    if (onRequireAuth) onRequireAuth()
+                    return
+                  }
                   onTake(signal._id)
                 }}
                 disabled={actionLoading === signal._id}
@@ -480,7 +498,7 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
                   transition-all transform hover:scale-[1.02] active:scale-[0.98]
                 "
               >
-                {actionLoading === signal._id ? 'Processing...' : 'Take Trade'}
+                {actionLoading === signal._id ? 'Processing...' : canTrade ? 'Take Trade' : 'Login To Take Trade'}
               </button>
             </div>
           ) : (
@@ -504,7 +522,7 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
   )
 }
 
-const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}, qualityApiFailed = false }) => {
+const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}, qualityApiFailed = false, canTrade = false, onRequireAuth }) => {
   const [expandedId, setExpandedId] = useState(null)
   const generatedRef = useRef(null)
   const targetHitRef = useRef(null)
@@ -548,6 +566,8 @@ const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}
           onTake={onTake}
           qualityData={qualityBySymbol?.[signal.coin]}
           qualityApiFailed={qualityApiFailed}
+          canTrade={canTrade}
+          onRequireAuth={onRequireAuth}
         />
       ))}
     </div>

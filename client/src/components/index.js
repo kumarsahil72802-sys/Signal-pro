@@ -4,3 +4,4 @@ export { default as News } from './News';
 export { default as Signals } from './Signals';
 export { default as Stats } from './Stats';
 export { default as Toast } from './Toast';
+export { default as AuthPanel } from './AuthPanel';

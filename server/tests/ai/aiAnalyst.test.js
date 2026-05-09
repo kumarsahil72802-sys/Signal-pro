@@ -66,6 +66,11 @@ test('parseAiEnrichmentPayload parses strict JSON payload', () => {
   assert.equal(payload.riskNote, 'Strong setup but watch resistance.');
 });
 
+test('parseAiEnrichmentPayload returns null for invalid payload', () => {
+  const payload = parseAiEnrichmentPayload('not-json-payload');
+  assert.equal(payload, null);
+});
+
 test('buildEnrichmentPrompt includes full-context and performance blocks', () => {
   const prompt = buildEnrichmentPrompt(
     sampleSignal(),
@@ -88,7 +93,7 @@ test('buildPerformanceContext returns rate lines for trigger and symbol', () => 
   assert.match(context, /Coin\+Trigger\(BTCUSDT\)/);
 });
 
-test('enhancedAnalyze keeps signal in advisory mode when AI payload invalid (fallback)', async () => {
+test('enhancedAnalyze keeps signal advisory when Groq and NVIDIA payloads fail (fail-open)', async () => {
   const signal = sampleSignal();
   const result = await enhancedAnalyze(signal, {
     analyzePerformance: async () => null,
@@ -96,6 +101,11 @@ test('enhancedAnalyze keeps signal in advisory mode when AI payload invalid (fal
       text: 'not_json',
       attempts: 3,
       error: 'timeout'
+    }),
+    askNvidiaWithMeta: async () => ({
+      text: 'not_json',
+      attempts: 2,
+      error: 'nvidia_timeout'
     })
   });
 
@@ -105,9 +115,13 @@ test('enhancedAnalyze keeps signal in advisory mode when AI payload invalid (fal
   assert.equal(result.aiAttempts, 3);
   assert.equal(result.aiConfidence, signal.confidence);
   assert.equal(result.aiError, 'timeout');
+  assert.equal(result.nvidiaStatus, 'FALLBACK');
+  assert.equal(result.nvidiaAttempts, 2);
+  assert.equal(result.nvidiaConfidence, null);
+  assert.equal(result.nvidiaError, 'nvidia_timeout');
 });
 
-test('enhancedAnalyze applies Grok confidence on success payload', async () => {
+test('enhancedAnalyze keeps Groq primary and stores NVIDIA enrichment when both succeed', async () => {
   const signal = sampleSignal({ confidence: 74, trendStrength: 'STRONG', volumeSpike: true, rsi: 46 });
   const result = await enhancedAnalyze(signal, {
     analyzePerformance: async () => ({
@@ -118,6 +132,11 @@ test('enhancedAnalyze applies Grok confidence on success payload', async () => {
       text: '{"confidence_percent": 83, "risk_note": "Momentum supports trend; risk is sudden macro reversal."}',
       attempts: 1,
       error: null
+    }),
+    askNvidiaWithMeta: async () => ({
+      text: '{"confidence_percent": 79, "risk_note": "Liquidity stable; monitor macro headlines."}',
+      attempts: 1,
+      error: null
     })
   });
 
@@ -126,11 +145,42 @@ test('enhancedAnalyze applies Grok confidence on success payload', async () => {
   assert.equal(result.aiConfidence, 83);
   assert.match(result.groqInsight, /Momentum supports trend/);
   assert.equal(result.aiError, null);
+  assert.equal(result.nvidiaStatus, 'SUCCESS');
+  assert.equal(result.nvidiaAttempts, 1);
+  assert.equal(result.nvidiaConfidence, 79);
+  assert.match(result.nvidiaInsight, /Liquidity stable/);
+  assert.equal(result.nvidiaError, null);
+});
+
+test('enhancedAnalyze keeps Groq decision path stable when NVIDIA fails', async () => {
+  const signal = sampleSignal({ confidence: 71, trendStrength: 'STRONG', volumeSpike: true, rsi: 44 });
+  const result = await enhancedAnalyze(signal, {
+    analyzePerformance: async () => null,
+    askGroqWithMeta: async () => ({
+      text: '{"confidence_percent": 76, "risk_note": "Structure valid, but protect downside."}',
+      attempts: 1,
+      error: null
+    }),
+    askNvidiaWithMeta: async () => ({
+      text: 'not_json',
+      attempts: 2,
+      error: 'provider_error'
+    })
+  });
+
+  assert.equal(result.aiStatus, 'SUCCESS');
+  assert.equal(result.aiConfidence, 76);
+  assert.equal(result.aiError, null);
+  assert.equal(result.nvidiaStatus, 'FALLBACK');
+  assert.equal(result.nvidiaConfidence, null);
+  assert.equal(result.nvidiaAttempts, 2);
+  assert.equal(result.nvidiaError, 'provider_error');
 });
 
 test('enhancedAnalyze skips Grok when machine confidence is below trigger threshold', async () => {
   const signal = sampleSignal({ confidence: 59 });
   let groqCalled = false;
+  let nvidiaCalled = false;
 
   const result = await enhancedAnalyze(signal, {
     analyzePerformance: async () => null,
@@ -141,19 +191,32 @@ test('enhancedAnalyze skips Grok when machine confidence is below trigger thresh
         attempts: 1,
         error: null
       };
+    },
+    askNvidiaWithMeta: async () => {
+      nvidiaCalled = true;
+      return {
+        text: '{"confidence_percent": 88, "risk_note": "should not run"}',
+        attempts: 1,
+        error: null
+      };
     }
   });
 
   assert.equal(groqCalled, false);
+  assert.equal(nvidiaCalled, false);
   assert.equal(result.aiStatus, 'SKIPPED');
   assert.equal(result.aiConfidence, 59);
   assert.equal(result.aiAttempts, 0);
   assert.equal(result.aiError, 'below_ai_trigger_confidence');
+  assert.equal(result.nvidiaStatus, 'SKIPPED');
+  assert.equal(result.nvidiaAttempts, 0);
+  assert.equal(result.nvidiaError, 'below_ai_trigger_confidence');
 });
 
 test('enhancedAnalyze allows Grok when machine confidence equals trigger threshold', async () => {
   const signal = sampleSignal({ confidence: 60 });
   let groqCalled = false;
+  let nvidiaCalled = false;
 
   const result = await enhancedAnalyze(signal, {
     analyzePerformance: async () => null,
@@ -164,11 +227,23 @@ test('enhancedAnalyze allows Grok when machine confidence equals trigger thresho
         attempts: 1,
         error: null
       };
+    },
+    askNvidiaWithMeta: async () => {
+      nvidiaCalled = true;
+      return {
+        text: '{"confidence_percent": 64, "risk_note": "Boundary call executed for NVIDIA."}',
+        attempts: 1,
+        error: null
+      };
     }
   });
 
   assert.equal(groqCalled, true);
+  assert.equal(nvidiaCalled, true);
   assert.equal(result.aiStatus, 'SUCCESS');
   assert.equal(result.aiConfidence, 67);
   assert.equal(result.aiAttempts, 1);
+  assert.equal(result.nvidiaStatus, 'SUCCESS');
+  assert.equal(result.nvidiaConfidence, 64);
+  assert.equal(result.nvidiaAttempts, 1);
 });

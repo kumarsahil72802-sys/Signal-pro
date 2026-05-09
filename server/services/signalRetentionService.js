@@ -35,6 +35,112 @@ function hasExpectedTtlFilter(partialFilter) {
   );
 }
 
+function buildBulkWriteResult(modifiedCount = 0) {
+  return { modifiedCount };
+}
+
+function resolveClosedAt(signal) {
+  const candidate = signal?.closedAt || signal?.missedAt || signal?.createdAt;
+  const resolved = candidate ? new Date(candidate) : null;
+  if (!resolved) return null;
+  return Number.isFinite(resolved.getTime()) ? resolved : null;
+}
+
+async function runPipelineUpdateWithFallback({
+  label,
+  filter,
+  pipeline,
+  fallback
+}) {
+  try {
+    const result = await Signal.updateMany(filter, pipeline, { updatePipeline: true });
+    console.log(`[Retention] ${label}: pipeline_applied (${result.modifiedCount || 0} modified).`);
+    return result;
+  } catch (error) {
+    console.warn(`[Retention] ${label}: pipeline_failed (${error.message}) -> fallback_applied.`);
+    const fallbackResult = await fallback();
+    const modified = fallbackResult?.modifiedCount || 0;
+    console.log(`[Retention] ${label}: fallback_applied (${modified} modified).`);
+    return fallbackResult;
+  }
+}
+
+async function fallbackMigrateMissedSignals() {
+  const missedSignals = await Signal.find(
+    { status: 'MISSED' },
+    { _id: 1, closedAt: 1, missedAt: 1, createdAt: 1 }
+  ).lean();
+
+  if (missedSignals.length === 0) {
+    return buildBulkWriteResult(0);
+  }
+
+  const ops = missedSignals.map((signal) => {
+    const closedAt = resolveClosedAt(signal) || new Date();
+    return {
+      updateOne: {
+        filter: { _id: signal._id },
+        update: {
+          $set: {
+            status: 'CLOSED',
+            result: 'TARGET_HIT',
+            isMissedOpportunity: true,
+            closedAt
+          }
+        }
+      }
+    };
+  });
+
+  const result = await Signal.bulkWrite(ops, { ordered: false });
+  return buildBulkWriteResult(result.modifiedCount || 0);
+}
+
+async function fallbackBackfillClosedOutcomes() {
+  const signals = await Signal.find(
+    {
+      status: 'CLOSED',
+      result: { $in: ['TARGET_HIT', 'SL_HIT', 'EXPIRED'] },
+      expireAt: { $not: { $type: 'date' } },
+      $or: [
+        { closedAt: { $type: 'date' } },
+        { missedAt: { $type: 'date' } },
+        { createdAt: { $type: 'date' } }
+      ]
+    },
+    { _id: 1, closedAt: 1, missedAt: 1, createdAt: 1 }
+  ).lean();
+
+  if (signals.length === 0) {
+    return buildBulkWriteResult(0);
+  }
+
+  const ops = [];
+  for (const signal of signals) {
+    const closedAt = resolveClosedAt(signal);
+    if (!closedAt) continue;
+
+    ops.push({
+      updateOne: {
+        filter: { _id: signal._id },
+        update: {
+          $set: {
+            closedAt,
+            expireAt: new Date(closedAt.getTime() + OUTCOME_CLEANUP_TTL_MS)
+          }
+        }
+      }
+    });
+  }
+
+  if (ops.length === 0) {
+    return buildBulkWriteResult(0);
+  }
+
+  const result = await Signal.bulkWrite(ops, { ordered: false });
+  return buildBulkWriteResult(result.modifiedCount || 0);
+}
+
 async function enforceSignalRetentionPolicy() {
   try {
     const indexes = await Signal.collection.indexes();
@@ -62,9 +168,10 @@ async function enforceSignalRetentionPolicy() {
       console.log('[Retention] Created partial TTL index for TARGET_HIT + SL_HIT + EXPIRED outcomes.');
     }
 
-    await Signal.updateMany(
-      { status: 'MISSED' },
-      [
+    await runPipelineUpdateWithFallback({
+      label: 'missed_signal_migration',
+      filter: { status: 'MISSED' },
+      pipeline: [
         {
           $set: {
             status: 'CLOSED',
@@ -75,11 +182,13 @@ async function enforceSignalRetentionPolicy() {
             }
           }
         }
-      ]
-    );
+      ],
+      fallback: fallbackMigrateMissedSignals
+    });
 
-    const closedBackfill = await Signal.updateMany(
-      {
+    const closedBackfill = await runPipelineUpdateWithFallback({
+      label: 'closed_outcome_backfill',
+      filter: {
         status: 'CLOSED',
         result: { $in: ['TARGET_HIT', 'SL_HIT', 'EXPIRED'] },
         expireAt: { $not: { $type: 'date' } },
@@ -89,7 +198,7 @@ async function enforceSignalRetentionPolicy() {
           { createdAt: { $type: 'date' } }
         ]
       },
-      [
+      pipeline: [
         {
           $set: {
             closedAt: {
@@ -112,8 +221,9 @@ async function enforceSignalRetentionPolicy() {
             }
           }
         }
-      ]
-    );
+      ],
+      fallback: fallbackBackfillClosedOutcomes
+    });
 
     const backfilledCount = closedBackfill.modifiedCount || 0;
     if (backfilledCount > 0) {

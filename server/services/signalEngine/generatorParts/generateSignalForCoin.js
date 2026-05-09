@@ -1,4 +1,5 @@
 const { getKlines } = require('../../binanceService');
+const { getFuturesContext } = require('../../futuresService');
 const { getExecutionQualityForSymbols } = require('../../executionQualityService');
 const { saveTradeSnapshot } = require('../../tradeService');
 const Signal = require('../../../models/Signal');
@@ -75,6 +76,14 @@ function clampConfidence(value) {
   return Math.max(0, Math.min(100, value));
 }
 
+function incrementGateCounter(gateCounters, gate) {
+  if (!gateCounters || !gate) return;
+  if (!Number.isFinite(gateCounters[gate])) {
+    gateCounters[gate] = 0;
+  }
+  gateCounters[gate] += 1;
+}
+
 async function canRunForCoin(coin) {
   const activeSignal = await Signal.findOne({ coin, status: 'ACTIVE' });
   if (activeSignal) {
@@ -85,14 +94,14 @@ async function canRunForCoin(coin) {
         closedAt: new Date()
       });
       console.log(`[ENGINE] ${coin} stale ACTIVE signal auto-closed -> EXPIRED`);
-      return true;
+      return { allowed: true };
     }
     console.log(`[ENGINE] ${coin} skipped -> Active signal exists`);
-    return false;
+    return { allowed: false, gate: 'cooldown' };
   }
 
   if (COOLDOWN_MS <= 0) {
-    return true;
+    return { allowed: true };
   }
 
   const recentSignal = await Signal.findOne({
@@ -104,7 +113,7 @@ async function canRunForCoin(coin) {
     const elapsed = Date.now() - recentSignal.createdAt.getTime();
     const mins = Math.ceil((COOLDOWN_MS - elapsed) / 60000);
     console.log(`[ENGINE] ${coin} skipped -> Recent signal exists (${mins}m ago)`);
-    return false;
+    return { allowed: false, gate: 'cooldown' };
   }
 
   const lastTime = lastSignalTimes.get(coin);
@@ -113,14 +122,14 @@ async function canRunForCoin(coin) {
     const remaining = COOLDOWN_MS - elapsed;
     if (remaining > 0) {
       console.log(`[ENGINE] ${coin} skipped -> Cooldown (${Math.ceil(remaining / 60000)}m remaining)`);
-      return false;
+      return { allowed: false, gate: 'cooldown' };
     }
   }
 
-  return true;
+  return { allowed: true };
 }
 
-function resolveSetup(coin, klines, allCloses, trendCloses, currentPrice) {
+function resolveSetup(coin, klines, allCloses, trendCloses, currentPrice, gateCounters = null) {
   const breakoutSignal = detectVolatilityBreakout(klines);
 
   const regEma9 = calculateEMA(trendCloses, 9);
@@ -133,6 +142,7 @@ function resolveSetup(coin, klines, allCloses, trendCloses, currentPrice) {
 
   if (regime === 'RANGING' && !allowRangingSetup) {
     console.log(`[ENGINE] ${coin} skipped -> Market Regime is RANGING (M2C2 Phase 1 Filter)`);
+    incrementGateCounter(gateCounters, 'ranging');
     return null;
   }
 
@@ -173,6 +183,7 @@ function resolveSetup(coin, klines, allCloses, trendCloses, currentPrice) {
 
   if (!advancedSignal) {
     console.log(`[Engine] ${coin} skipped -> No valid trigger (Flat market)`);
+    incrementGateCounter(gateCounters, 'no_trigger');
     return null;
   }
 
@@ -186,8 +197,8 @@ function resolveBtcPenalty(coin, btcTrend, trend) {
       console.log(`[Engine] ${coin} BUY signal BLOCKED by BTC Strong Bearish trend`);
       return { blocked: true, penalty: 0 };
     }
-    console.log(`[Engine] ${coin} BUY signal penalized (-25) by BTC Strong Bearish trend`);
-    return { blocked: false, penalty: -25 };
+    console.log(`[Engine] ${coin} BUY signal penalized (-12) by BTC Strong Bearish trend`);
+    return { blocked: false, penalty: -12 };
   }
 
   if (btcTrend.includes('BULLISH') && trend === 'SELL') {
@@ -315,8 +326,12 @@ function applyAiDecisionModes(adjustedSignal) {
   return adjustedSignal;
 }
 
-async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN') {
-  if (!(await canRunForCoin(coin))) return null;
+async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN', gateCounters = null) {
+  const runCheck = await canRunForCoin(coin);
+  if (!runCheck.allowed) {
+    incrementGateCounter(gateCounters, runCheck.gate);
+    return null;
+  }
 
   let klines;
   try {
@@ -329,6 +344,7 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
     console.log(`[Engine] ${coin} skipped -> Insufficient data`);
     return null;
   }
+  const futuresData = await getFuturesContext(coin).catch(() => null);
 
   const allCloses = klines.map((k) => k.close);
   const trendCloses = allCloses.slice(-TREND_CANDLES);
@@ -336,7 +352,7 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   const volumeData = checkVolume(klines);
   const volumeDelta = calculateVolumeDelta(klines);
 
-  const setup = resolveSetup(coin, klines, allCloses, trendCloses, currentPrice);
+  const setup = resolveSetup(coin, klines, allCloses, trendCloses, currentPrice, gateCounters);
   if (!setup) return null;
   const { advancedSignal, regime } = setup;
   const { trend, trigger } = advancedSignal;
@@ -447,10 +463,16 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   confidence = clampConfidence(confidence + guardrailDecision.penalty);
 
   const initialGate = passQualityGate(coin, confidence, volumeData, momentum);
-  if (!initialGate.passed) return null;
+  if (!initialGate.passed) {
+    incrementGateCounter(gateCounters, 'quality_fail');
+    return null;
+  }
 
   const fourH = apply4HGate(coin, trend, confidence, higherTimeframeTrend);
-  if (fourH.blocked) return null;
+  if (fourH.blocked) {
+    incrementGateCounter(gateCounters, 'fourh_block');
+    return null;
+  }
   confidence = fourH.confidence;
 
   const execution = await applyExecutionGate(coin, confidence);
@@ -478,7 +500,10 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   confidence = clampConfidence(confidence + segmentAdjustment.adjustment);
 
   const finalGate = passQualityGate(coin, confidence, volumeData, momentum, 'Final ');
-  if (!finalGate.passed) return null;
+  if (!finalGate.passed) {
+    incrementGateCounter(gateCounters, 'quality_fail');
+    return null;
+  }
   const signalQuality = finalGate.signalQuality;
 
   const atr = calculateATR(klines, 14);
@@ -542,6 +567,9 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
     ...signalData,
     rsi,
     prevRsi,
+    futuresData,
+    takerBuyVolume: klines[klines.length - 1]?.takerBuyVolume ?? null,
+    numberOfTrades: klines[klines.length - 1]?.numberOfTrades ?? null,
     volumeSpike: volumeData.isSpike,
     btcTrend,
     trendStrength: signalQuality,
@@ -561,6 +589,11 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   signalData.aiDecision = finalAdjusted.aiDecision;
   signalData.aiMessage = finalAdjusted.aiMessage;
   signalData.groqInsight = finalAdjusted.groqInsight ?? '';
+  signalData.nvidiaConfidence = finalAdjusted.nvidiaConfidence ?? null;
+  signalData.nvidiaInsight = finalAdjusted.nvidiaInsight ?? '';
+  signalData.nvidiaStatus = finalAdjusted.nvidiaStatus || 'SKIPPED';
+  signalData.nvidiaAttempts = Number.isFinite(Number(finalAdjusted.nvidiaAttempts)) ? Number(finalAdjusted.nvidiaAttempts) : 0;
+  signalData.nvidiaError = finalAdjusted.nvidiaError || null;
   signalData.aiStatus = finalAdjusted.aiStatus || 'SKIPPED';
   signalData.aiAttempts = Number.isFinite(Number(finalAdjusted.aiAttempts)) ? Number(finalAdjusted.aiAttempts) : 0;
   signalData.aiError = finalAdjusted.aiError || null;

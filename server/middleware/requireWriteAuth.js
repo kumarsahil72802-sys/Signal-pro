@@ -1,11 +1,12 @@
 const crypto = require('crypto');
+const { isJwtAuthConfigured, verifyAccessToken } = require('../services/authService');
 
 function isWriteAuthEnabled() {
   const explicitlyDisabled = String(process.env.DISABLE_WRITE_AUTH || '').trim().toLowerCase() === 'true';
   if (explicitlyDisabled) return false;
 
   const hasApiKey = String(process.env.SIGNAL_WRITE_API_KEY || '').trim().length > 0;
-  return process.env.NODE_ENV === 'production' || hasApiKey;
+  return process.env.NODE_ENV === 'production' || hasApiKey || isJwtAuthConfigured();
 }
 
 function getProvidedToken(req) {
@@ -29,16 +30,37 @@ function requireWriteAuth(req, res, next) {
     return next();
   }
 
+  const providedToken = getProvidedToken(req);
+  if (!providedToken) {
+    return res.status(401).json({
+      message: 'Unauthorized write request.'
+    });
+  }
+
+  if (isJwtAuthConfigured()) {
+    try {
+      const decoded = verifyAccessToken(providedToken);
+      req.auth = {
+        email: String(decoded?.sub || ''),
+        role: String(decoded?.role || 'admin')
+      };
+      return next();
+    } catch (error) {
+      return res.status(401).json({
+        message: 'Invalid or expired authentication token.'
+      });
+    }
+  }
+
   const expectedToken = String(process.env.SIGNAL_WRITE_API_KEY || '').trim();
   if (!expectedToken) {
-    console.error('[Auth] SIGNAL_WRITE_API_KEY is required when write auth is enabled.');
+    console.error('[Auth] Configure JWT auth (ADMIN_EMAIL/ADMIN_PASSWORD/AUTH_JWT_SECRET) or set SIGNAL_WRITE_API_KEY.');
     return res.status(503).json({
       message: 'Write operations are temporarily unavailable.'
     });
   }
 
-  const providedToken = getProvidedToken(req);
-  if (!providedToken || !secureEquals(providedToken, expectedToken)) {
+  if (!secureEquals(providedToken, expectedToken)) {
     return res.status(401).json({
       message: 'Unauthorized write request.'
     });

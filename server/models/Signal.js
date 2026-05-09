@@ -66,6 +66,15 @@ const signalSchema = new mongoose.Schema({
   },
   aiMessage: { type: String, default: null },
   groqInsight: { type: String, default: '' },
+  nvidiaConfidence: { type: Number, min: 0, max: 100, default: null },
+  nvidiaInsight: { type: String, default: '' },
+  nvidiaStatus: {
+    type: String,
+    enum: ['SUCCESS', 'FALLBACK', 'SKIPPED'],
+    default: 'SKIPPED'
+  },
+  nvidiaAttempts: { type: Number, default: 0, min: 0 },
+  nvidiaError: { type: String, default: null },
   aiStatus: {
     type: String,
     enum: ['SUCCESS', 'FALLBACK', 'SKIPPED'],

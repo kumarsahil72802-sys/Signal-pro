@@ -53,7 +53,11 @@ const {
   SIGNAL_AI_ENRICHMENT_TIMING,
   SIGNAL_AI_RETRY_COUNT,
   SIGNAL_AI_RETRY_BACKOFF_MS,
-  SIGNAL_AI_TIMEOUT_MS
+  SIGNAL_AI_TIMEOUT_MS,
+  SIGNAL_MIN_SIGNALS_PER_DAY,
+  SIGNAL_SUPPLY_LOOKBACK_HOURS,
+  SIGNAL_SUPPLY_ADJUST_STEP,
+  SIGNAL_SUPPLY_MIN_BASE_THRESHOLD
 } = settings;
 
 // ============================================================================
@@ -203,6 +207,40 @@ async function runAutoLearning() {
   }
 }
 
+async function runSignalSupplyGuard(createdThisCycle) {
+  if (SIGNAL_MIN_SIGNALS_PER_DAY <= 0) return;
+  if (createdThisCycle > 0) return;
+
+  const lookbackHours = Math.max(6, SIGNAL_SUPPLY_LOOKBACK_HOURS);
+  const lookbackStart = new Date(Date.now() - lookbackHours * 60 * 60 * 1000);
+
+  const recentSignals = await Signal.countDocuments({
+    createdAt: { $gte: lookbackStart }
+  });
+
+  if (recentSignals >= SIGNAL_MIN_SIGNALS_PER_DAY) {
+    return;
+  }
+
+  const currentBaseThreshold = getConfidenceThreshold();
+  const step = Math.max(1, SIGNAL_SUPPLY_ADJUST_STEP);
+  const minBaseThreshold = Math.max(50, SIGNAL_SUPPLY_MIN_BASE_THRESHOLD);
+
+  if (currentBaseThreshold <= minBaseThreshold) {
+    console.log(
+      `[SUPPLY] Low supply detected (${recentSignals}/${SIGNAL_MIN_SIGNALS_PER_DAY} in ${lookbackHours}h) but threshold already at floor ${currentBaseThreshold}.`
+    );
+    return;
+  }
+
+  const nextThreshold = Math.max(minBaseThreshold, currentBaseThreshold - step);
+  await updateConfidenceThreshold(nextThreshold);
+  console.log(
+    `[SUPPLY] Low supply detected (${recentSignals}/${SIGNAL_MIN_SIGNALS_PER_DAY} in ${lookbackHours}h). ` +
+    `Lowered base threshold ${currentBaseThreshold} -> ${nextThreshold} (effective: ${getEffectiveConfidenceThreshold()}).`
+  );
+}
+
 
 async function runEngine() {
   if (isEngineTickInProgress()) {
@@ -217,6 +255,14 @@ async function runEngine() {
 
     console.log(`[ENGINE] Running signal generation (base threshold: ${getConfidenceThreshold()}, effective: ${getEffectiveConfidenceThreshold()})...`);
     let created = 0;
+    const cycleGateCounts = {
+      cooldown: 0,
+      ranging: 0,
+      no_trigger: 0,
+      quality_fail: 0,
+      fourh_block: 0,
+      saved: 0
+    };
 
     // Fetch market data once for all coins to avoid rate limiting
     const topSelectorCount = parseTopSelector(COIN_SELECTOR) || 0;
@@ -248,12 +294,20 @@ async function runEngine() {
 
     for (const coin of coinsToAnalyze) {
       try {
-        const signal = await generateSignalForCoin(coin, topCoins, btcTrend);
-        if (signal) created++;
+        const signal = await generateSignalForCoin(coin, topCoins, btcTrend, cycleGateCounts);
+        if (signal) {
+          created++;
+          cycleGateCounts.saved += 1;
+        }
       } catch (error) {
         console.error(`[ENGINE] ${coin}: Error - ${error.message}`);
       }
     }
+    console.log(
+      `[ENGINE] Cycle → cooldown:${cycleGateCounts.cooldown} | ranging:${cycleGateCounts.ranging} | no_trigger:${cycleGateCounts.no_trigger} | quality_fail:${cycleGateCounts.quality_fail} | fourh_block:${cycleGateCounts.fourh_block} | saved:${cycleGateCounts.saved}`
+    );
+
+    await runSignalSupplyGuard(created);
 
     if (created > 0) {
       console.log(`[ENGINE] Done. ${created} signal(s) generated.`);

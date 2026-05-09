@@ -201,7 +201,10 @@ async function getKlines(symbol, interval = '1h', limit = 100, options = {}) { /
       low: parseFloat(k[3]),
       close: parseFloat(k[4]),
       volume: parseFloat(k[5]),
-      closeTime: k[6]
+      closeTime: k[6],
+      quoteVolume: parseFloat(k[7]),
+      numberOfTrades: Number(k[8]),
+      takerBuyVolume: parseFloat(k[9])
     }));
   } catch (error) {
     throw new Error(`Error fetching klines for ${symbol}: ${error.message}`);
