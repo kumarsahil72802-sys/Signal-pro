@@ -22,6 +22,7 @@ const signalSchema = new mongoose.Schema({
     bonus: { type: Number, default: 0 },
     penalty: { type: Number, default: 0 }
   },
+  indicators: { type: mongoose.Schema.Types.Mixed, default: null },
   sentimentScore: { type: Number, min: -1, max: 1, default: 0 },
   newsSummary: { type: String, default: '' },
   reason: {
@@ -47,6 +48,77 @@ const signalSchema = new mongoose.Schema({
     articleBias: { type: Number, default: 0 },
     macroBias: { type: Number, default: 0 }
   },
+  macroTrends: { type: mongoose.Schema.Types.Mixed, default: null },
+  orderBookLiquidity: { type: mongoose.Schema.Types.Mixed, default: null },
+  futuresContext: {
+    fundingRate: { type: Number, default: null },
+    longShortRatio: { type: Number, default: null },
+    takerBuySellRatio: { type: Number, default: null },
+    openInterest: { type: Number, default: null },
+    fundingRateAvg: { type: Number, default: null },
+    fundingRateTrendPct: { type: Number, default: null },
+    openInterestTrendPct: { type: Number, default: null },
+    topTraderPositionRatio: { type: Number, default: null },
+    topTraderAccountRatio: { type: Number, default: null },
+    crowdingBias: { type: Number, default: null }
+  },
+  realtimeContext: {
+    status: { type: String, default: 'UNAVAILABLE' },
+    stale: { type: Boolean, default: true },
+    spreadPct: { type: Number, default: null },
+    tradeImbalance1m: { type: Number, default: null },
+    buyQuote1m: { type: Number, default: null },
+    sellQuote1m: { type: Number, default: null },
+    tradeCount1m: { type: Number, default: 0 },
+    bookImbalancePct: { type: Number, default: null },
+    cvd1m: { type: Number, default: null },
+    cvd5m: { type: Number, default: null },
+    cvd15m: { type: Number, default: null },
+    cumulativeCvd: { type: Number, default: null },
+    cvdSlope15m: { type: Number, default: null },
+    cvdDivergence: { type: String, default: 'NONE' },
+    priceChange15mPct: { type: Number, default: null },
+    socketState: { type: String, default: '' },
+    lastUpdateTs: { type: Number, default: null }
+  },
+  supportResistance: { type: mongoose.Schema.Types.Mixed, default: null },
+  marketStructure: { type: mongoose.Schema.Types.Mixed, default: null },
+  marketStructureSignal: { type: mongoose.Schema.Types.Mixed, default: null },
+  adxContext: { type: mongoose.Schema.Types.Mixed, default: null },
+  regimeContext: { type: mongoose.Schema.Types.Mixed, default: null },
+  cvdContext: { type: mongoose.Schema.Types.Mixed, default: null },
+  liquidationContext: { type: mongoose.Schema.Types.Mixed, default: null },
+  depthContext: { type: mongoose.Schema.Types.Mixed, default: null },
+  confidenceCalibration: { type: mongoose.Schema.Types.Mixed, default: null },
+  riskModel: { type: mongoose.Schema.Types.Mixed, default: null },
+  executionIntelligence: { type: mongoose.Schema.Types.Mixed, default: null },
+  aiRiskPlan: { type: mongoose.Schema.Types.Mixed, default: null },
+  rrAnalysis: { type: mongoose.Schema.Types.Mixed, default: null },
+  tradeQualityGrade: {
+    type: String,
+    enum: ['A+', 'A', 'B', 'C', 'D', 'REJECTED'],
+    default: null
+  },
+  riskGrade: {
+    type: String,
+    enum: ['LOW', 'MEDIUM', 'HIGH', 'EXTREME', 'UNKNOWN'],
+    default: null
+  },
+  executionRealismScore: { type: Number, min: 0, max: 100, default: null },
+  survivabilityScore: { type: Number, min: 0, max: 100, default: null },
+  structureStopReason: { type: String, default: null },
+  targetLogicReason: { type: String, default: null },
+  tradeDecisionReason: { type: String, default: null },
+  agreementStrength: {
+    type: String,
+    enum: ['STRONG', 'ACCEPTABLE', 'FRAGILE', 'CONFLICT', 'UNKNOWN'],
+    default: null
+  },
+  contradictionSeverity: {
+    type: String,
+    enum: ['NONE', 'LOW', 'ELEVATED', 'SEVERE'],
+    default: null
+  },
   segmentKey: { type: String, default: null, index: true },
   guardrailFlags: [{ type: String }],
   machineVersion: { type: String, default: 'winrate_v1' },
@@ -65,8 +137,18 @@ const signalSchema = new mongoose.Schema({
     default: null
   },
   aiMessage: { type: String, default: null },
+  groqTradeCall: {
+    type: String,
+    enum: ['TAKE', 'WAIT', 'SKIP'],
+    default: null
+  },
   groqInsight: { type: String, default: '' },
   nvidiaConfidence: { type: Number, min: 0, max: 100, default: null },
+  nvidiaTradeCall: {
+    type: String,
+    enum: ['TAKE', 'WAIT', 'SKIP'],
+    default: null
+  },
   nvidiaInsight: { type: String, default: '' },
   nvidiaStatus: {
     type: String,
@@ -82,6 +164,19 @@ const signalSchema = new mongoose.Schema({
   },
   aiAttempts: { type: Number, default: 0, min: 0 },
   aiError: { type: String, default: null },
+  machineContext: { type: mongoose.Schema.Types.Mixed, default: null },
+  grokValidation: { type: mongoose.Schema.Types.Mixed, default: null },
+  nvidiaValidation: { type: mongoose.Schema.Types.Mixed, default: null },
+  triCore: { type: mongoose.Schema.Types.Mixed, default: null },
+  finalTradeDecision: {
+    type: String,
+    enum: ['TAKE', 'WAIT', 'SKIP'],
+    default: null
+  },
+  aiAgreementScore: { type: Number, min: 0, max: 100, default: null },
+  contradictionList: [{ type: String }],
+  validatorReasons: [{ type: String }],
+  finalConfidenceBreakdown: { type: mongoose.Schema.Types.Mixed, default: null },
   status: {
     type: String,
     enum: ['ACTIVE', 'TAKEN', 'CLOSED'],
@@ -89,7 +184,7 @@ const signalSchema = new mongoose.Schema({
   },
   result: {
     type: String,
-    enum: ['PENDING', 'TARGET_HIT', 'SL_HIT', 'EXPIRED'],
+    enum: ['PENDING', 'TARGET_HIT', 'SL_HIT', 'EXPIRED', 'MANUALLY_CLOSED'],
     default: 'PENDING'
   },
   isMissedOpportunity: { type: Boolean, default: false },
@@ -112,7 +207,8 @@ signalSchema.index(
       $or: [
         { status: 'CLOSED', result: 'TARGET_HIT' },
         { status: 'CLOSED', result: 'SL_HIT' },
-        { status: 'CLOSED', result: 'EXPIRED' }
+        { status: 'CLOSED', result: 'EXPIRED' },
+        { status: 'CLOSED', result: 'MANUALLY_CLOSED' }
       ]
     }
   }

@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { getMarketChart } from '../services/api'
-import ConfidenceComparison from './confidence/ConfidenceComparison'
 
 const CHART_INTERVAL_OPTIONS = ['5m', '15m', '1h', '4h']
 const CHART_LIMIT_BY_INTERVAL = {
@@ -53,6 +52,57 @@ const getExecutionClass = (quality) => {
   if (quality === 'MODERATE') return 'bg-[#3a2d10] text-[#ffd56a] border border-[#6b551f]'
   if (quality === 'RISKY') return 'bg-[#3b1b26] text-[#ff8fa1] border border-[#6b3040]'
   return 'bg-[#1e2a3f] text-[#9cb1d3] border border-[#30435f]'
+}
+
+const getTradeCallClass = (tradeCall) => {
+  if (tradeCall === 'TAKE') return 'bg-[#173427] text-[#64f2b3] border border-[#2a6b4e]'
+  if (tradeCall === 'WAIT') return 'bg-[#3a2d10] text-[#ffd56a] border border-[#6b551f]'
+  if (tradeCall === 'SKIP') return 'bg-[#3b1b26] text-[#ff8fa1] border border-[#6b3040]'
+  return 'bg-[#1e2a3f] text-[#9cb1d3] border border-[#30435f]'
+}
+
+const getDecisionClass = (decision) => {
+  if (decision === 'TAKE') return 'bg-[#173427] text-[#64f2b3] border border-[#2a6b4e]'
+  if (decision === 'WAIT') return 'bg-[#3a2d10] text-[#ffd56a] border border-[#6b551f]'
+  if (decision === 'SKIP') return 'bg-[#3b1b26] text-[#ff8fa1] border border-[#6b3040]'
+  return 'bg-[#1e2a3f] text-[#9cb1d3] border border-[#30435f]'
+}
+
+const getAgreementStrengthFromScore = (score) => {
+  if (!Number.isFinite(score)) return 'UNKNOWN'
+  if (score >= 75) return 'STRONG'
+  if (score >= 58) return 'ACCEPTABLE'
+  if (score >= 45) return 'FRAGILE'
+  return 'CONFLICT'
+}
+
+const getAgreementClass = (strength) => {
+  if (strength === 'STRONG') return 'bg-[#173427] text-[#64f2b3] border border-[#2a6b4e]'
+  if (strength === 'ACCEPTABLE') return 'bg-[#19334a] text-[#8fc3ff] border border-[#2d5275]'
+  if (strength === 'FRAGILE') return 'bg-[#3a2d10] text-[#ffd56a] border border-[#6b551f]'
+  if (strength === 'CONFLICT') return 'bg-[#3b1b26] text-[#ff8fa1] border border-[#6b3040]'
+  return 'bg-[#1e2a3f] text-[#9cb1d3] border border-[#30435f]'
+}
+
+const getRiskClass = (risk) => {
+  if (risk === 'LOW') return 'bg-[#173427] text-[#64f2b3] border border-[#2a6b4e]'
+  if (risk === 'MEDIUM') return 'bg-[#3a2d10] text-[#ffd56a] border border-[#6b551f]'
+  if (risk === 'HIGH' || risk === 'EXTREME') return 'bg-[#3b1b26] text-[#ff8fa1] border border-[#6b3040]'
+  return 'bg-[#1e2a3f] text-[#9cb1d3] border border-[#30435f]'
+}
+
+const getTradeGradeClass = (grade) => {
+  if (grade === 'A+' || grade === 'A') return 'bg-[#173427] text-[#64f2b3] border border-[#2a6b4e]'
+  if (grade === 'B') return 'bg-[#19334a] text-[#8fc3ff] border border-[#2d5275]'
+  if (grade === 'C') return 'bg-[#3a2d10] text-[#ffd56a] border border-[#6b551f]'
+  if (grade === 'D' || grade === 'REJECTED') return 'bg-[#3b1b26] text-[#ff8fa1] border border-[#6b3040]'
+  return 'bg-[#1e2a3f] text-[#9cb1d3] border border-[#30435f]'
+}
+
+const formatRrRatio = (signal) => {
+  const ratio = Number(signal?.rrAnalysis?.ratio ?? signal?.riskModel?.realizedRR)
+  if (!Number.isFinite(ratio) || ratio <= 0) return 'N/A'
+  return `1:${ratio.toFixed(2)}`
 }
 
 const getSignalQualityView = (qualityData, qualityApiFailed) => {
@@ -194,7 +244,7 @@ const TrendChart = ({ points, interval, loading, error, onIntervalChange }) => {
   )
 }
 
-const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, qualityData, qualityApiFailed, canTrade, onRequireAuth }) => {
+const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, qualityData, qualityApiFailed, canTrade }) => {
   const conf = signal.confidence ?? 0
   const isActive = signal.status === 'ACTIVE'
   const isTaken = signal.status === 'TAKEN'
@@ -279,6 +329,21 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
   const chartPoints = chartDataByInterval[chartInterval] || []
   const nvidiaConfidenceValue = Number(signal.nvidiaConfidence)
   const hasNvidiaConfidence = Number.isFinite(nvidiaConfidenceValue)
+  const hasGroqAssessment = Boolean(signal.groqTradeCall || signal.groqInsight)
+  const hasNvidiaAssessment = Boolean(signal.nvidiaTradeCall || signal.nvidiaInsight || hasNvidiaConfidence)
+  const triCoreConfidence = Number.isFinite(Number(signal.aiConfidence))
+    ? Number(signal.aiConfidence)
+    : Number(signal.confidence || 0)
+  const finalDecision = String(signal.finalTradeDecision || '').toUpperCase() || 'WAIT'
+  const tradeGrade = signal.tradeQualityGrade || signal.executionIntelligence?.tradeQualityGrade || 'N/A'
+  const agreementScore = Number(signal.aiAgreementScore)
+  const agreementStrength = signal.agreementStrength || getAgreementStrengthFromScore(agreementScore)
+  const rrRatio = formatRrRatio(signal)
+  const riskGrade = signal.riskGrade || signal.executionIntelligence?.riskGrade || 'UNKNOWN'
+  const tradeDecisionReason = signal.tradeDecisionReason || signal.executionIntelligence?.tradeDecisionReason || ''
+  const skipWarningMessage = tradeDecisionReason
+    ? `System recommends SKIP due to risk. ${tradeDecisionReason}`
+    : 'System recommends SKIP due to risk.'
 
   return (
     <div
@@ -304,19 +369,7 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
 
             <div>
               <h3 className="text-lg font-bold text-white">{signal.coin}</h3>
-              <div className="flex items-center gap-2 mt-1">
-                <span
-                  className={`
-                    px-2 py-0.5 text-xs font-bold rounded-full
-                    ${signal.type === 'BUY' ? 'bg-[#173427] text-[#64f2b3]' : 'bg-[#3b1b26] text-[#ff8fa1]'}
-                  `}
-                >
-                  {signal.type}
-                </span>
-                <span className="text-sm text-[#90a4c7]">
-                  Entry: <span className="font-semibold text-[#e5edfa]">${signal.entryPrice}</span>
-                </span>
-              </div>
+              <p className="text-sm text-[#90a4c7] mt-1">Decision-first signal card</p>
             </div>
           </div>
 
@@ -327,51 +380,104 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
               </span>
             )}
 
-            <span
-              className={`
-                px-3 py-1 text-xs font-medium rounded-full
-                ${signal.status === 'ACTIVE' ? 'bg-[#172b49] text-[#85baff]' : ''}
-                ${signal.status === 'TAKEN' ? 'bg-[#173427] text-[#64f2b3]' : ''}
-                ${(signal.status === 'CLOSED' && signal.result === 'TARGET_HIT') ? 'bg-[#173427] text-[#64f2b3]' : ''}
-                ${signal.status === 'CLOSED' ? 'bg-[#23314a] text-[#a0b3d4]' : ''}
-              `}
-            >
-              {signal.status}
+            <span className={`px-3 py-1 text-xs font-bold rounded-lg ${getDecisionClass(finalDecision)}`}>
+              {finalDecision}
             </span>
           </div>
         </div>
 
         {!isExpanded && (
-          <div className="mt-4 space-y-3">
-            <ConfidenceComparison
-              machineConfidenceRaw={signal.confidence}
-              aiConfidenceRaw={signal.aiConfidence}
-            />
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
-              <div>
-                <span className="text-[#90a4c7]">Target:</span>
-                <span className="ml-1 font-semibold text-[#64f2b3]">${signal.target}</span>
-                <span className="ml-1 text-[#64f2b3]">(+{profitPercent}%)</span>
+          <div className="mt-4">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+              <div className="bg-[#16233a] border border-[#2b3f5d] rounded-lg px-2.5 py-2">
+                <p className="text-[10px] uppercase tracking-wider text-[#8ea2c4]">Entry</p>
+                <p className="text-sm font-semibold text-white">${signal.entryPrice}</p>
               </div>
-              <div>
-                <span className="text-[#90a4c7]">Stop:</span>
-                <span className="ml-1 font-semibold text-[#ff8fa1]">${signal.stopLoss}</span>
-                <span className="ml-1 text-[#ff8fa1]">({lossPercent}%)</span>
+              <div className="bg-[#16233a] border border-[#2b3f5d] rounded-lg px-2.5 py-2">
+                <p className="text-[10px] uppercase tracking-wider text-[#8ea2c4]">Target</p>
+                <p className="text-sm font-semibold text-[#64f2b3]">${signal.target}</p>
               </div>
-              <div className="flex items-center gap-2">
-                <span className={`px-1.5 py-0.5 rounded text-xs font-semibold ${getExecutionClass(qualityView.executionQuality)}`}>
-                  {qualityView.executionQuality}
-                </span>
-                <span className="text-xs text-[#8ea2c4]">Slip: {qualityView.slippageRisk}</span>
+              <div className="bg-[#16233a] border border-[#2b3f5d] rounded-lg px-2.5 py-2">
+                <p className="text-[10px] uppercase tracking-wider text-[#8ea2c4]">Stoploss</p>
+                <p className="text-sm font-semibold text-[#ff8fa1]">${signal.stopLoss}</p>
+              </div>
+              <div className="bg-[#16233a] border border-[#2b3f5d] rounded-lg px-2.5 py-2">
+                <p className="text-[10px] uppercase tracking-wider text-[#8ea2c4]">Confidence</p>
+                <p className="text-sm font-semibold text-white">{Math.round(triCoreConfidence)}%</p>
+              </div>
+              <div className="bg-[#16233a] border border-[#2b3f5d] rounded-lg px-2.5 py-2">
+                <p className="text-[10px] uppercase tracking-wider text-[#8ea2c4]">RR</p>
+                <p className="text-sm font-semibold text-white">{rrRatio}</p>
               </div>
             </div>
+
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              <div className="bg-[#16233a] border border-[#2b3f5d] rounded-lg px-2.5 py-2">
+                <p className="text-[10px] uppercase tracking-wider text-[#8ea2c4]">Risk</p>
+                <span className={`inline-flex mt-1 px-2 py-0.5 rounded text-xs font-semibold ${getRiskClass(riskGrade)}`}>
+                  {riskGrade}
+                </span>
+              </div>
+              <div className="bg-[#16233a] border border-[#2b3f5d] rounded-lg px-2.5 py-2">
+                <p className="text-[10px] uppercase tracking-wider text-[#8ea2c4]">Valid Time</p>
+                <p className={`text-sm font-semibold ${timeLeft === 'Expired' ? 'text-[#ff8fa1]' : 'text-white'}`}>
+                  {timeLeft || 'N/A'}
+                </p>
+              </div>
+            </div>
+
+            {finalDecision === 'SKIP' && (
+              <p className="mt-3 text-xs text-[#ffb3c2] bg-[#2a1620] border border-[#6b3040] rounded-lg px-3 py-2">
+                {skipWarningMessage}
+              </p>
+            )}
+
+            {isActive && (
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    if (!canTrade || actionLoading === signal._id) return
+                    onTake(signal._id)
+                  }}
+                  disabled={!canTrade || actionLoading === signal._id}
+                  className="
+                    flex-1 px-4 py-2.5 text-sm font-bold bg-[#19c37d] text-white rounded-xl hover:bg-[#13a96b]
+                    disabled:opacity-50 disabled:cursor-not-allowed transition-all
+                  "
+                >
+                  {actionLoading === signal._id ? 'Processing...' : 'Take Trade'}
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onToggle()
+                  }}
+                  className="flex-1 px-4 py-2.5 text-sm font-semibold rounded-xl bg-[#1b2b45] text-[#c8d8f0] border border-[#35507a] hover:bg-[#223555]"
+                >
+                  View Analysis
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
 
       {isExpanded && (
         <div className="border-t border-[#2a3a55] bg-[#0d1728] p-5">
+          <div className="mb-3 flex items-center justify-between">
+            <p className="text-xs text-[#8ea2c4] uppercase tracking-wider font-semibold">Full Analysis</p>
+            <button
+              type="button"
+              onClick={onToggle}
+              className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#1b2b45] text-[#c8d8f0] border border-[#35507a] hover:bg-[#223555]"
+            >
+              Hide Analysis
+            </button>
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
             <div className="bg-[#111b2d] p-4 rounded-xl border border-[#2a3a55]">
               <p className="text-xs text-[#8ea2c4] uppercase tracking-wider">Entry</p>
@@ -389,15 +495,44 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
             </div>
           </div>
 
-          <div className="mb-6">
-            <ConfidenceComparison
-              machineConfidenceRaw={signal.confidence}
-              aiConfidenceRaw={signal.aiConfidence}
-              expanded
-            />
-            <p className="mt-2 text-xs text-[#8ea2c4]">
-              Overall quality: <span className="font-semibold text-[#dbe7fb]">{signal.signalQuality || getConfLabel(conf)}</span>
-            </p>
+          <div className="mb-6 bg-[#111b2d] rounded-xl border border-[#2a3a55] p-4">
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+              <span className={`px-3 py-1 text-xs font-bold rounded-lg ${getDecisionClass(finalDecision)}`}>
+                Final Decision: {finalDecision}
+              </span>
+              <span className={`px-2 py-0.5 rounded text-xs font-semibold ${getTradeGradeClass(tradeGrade)}`}>
+                Trade Grade: {tradeGrade}
+              </span>
+              <span className={`px-2 py-0.5 rounded text-xs font-semibold ${getAgreementClass(agreementStrength)}`}>
+                AI Agreement: {agreementStrength}
+              </span>
+              <span className={`px-2 py-0.5 rounded text-xs font-semibold ${getRiskClass(riskGrade)}`}>
+                Risk: {riskGrade}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+              <div className="bg-[#18253a] rounded-lg p-2 border border-[#2a3a55]">
+                <p className="text-[#8ea2c4]">TriCore Confidence</p>
+                <p className="font-semibold text-white mt-1">{Math.round(triCoreConfidence)}%</p>
+              </div>
+              <div className="bg-[#18253a] rounded-lg p-2 border border-[#2a3a55]">
+                <p className="text-[#8ea2c4]">Machine Confidence</p>
+                <p className="font-semibold text-white mt-1">{Math.round(conf)}%</p>
+              </div>
+              <div className="bg-[#18253a] rounded-lg p-2 border border-[#2a3a55]">
+                <p className="text-[#8ea2c4]">RR Ratio</p>
+                <p className="font-semibold text-white mt-1">{rrRatio}</p>
+              </div>
+              <div className="bg-[#18253a] rounded-lg p-2 border border-[#2a3a55]">
+                <p className="text-[#8ea2c4]">Signal Quality</p>
+                <p className="font-semibold text-white mt-1">{signal.signalQuality || getConfLabel(conf)}</p>
+              </div>
+            </div>
+            {tradeDecisionReason && (
+              <p className="mt-3 text-xs text-[#8ea2c4]">
+                Decision reason: <span className="text-[#dbe7fb]">{tradeDecisionReason}</span>
+              </p>
+            )}
           </div>
 
           <div className="mb-6 bg-[#111b2d] rounded-xl border border-[#2a3a55] p-4">
@@ -424,6 +559,74 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
             </div>
           </div>
 
+          <div className="mb-6 bg-[#111b2d] rounded-xl border border-[#2a3a55] p-4">
+            <p className="text-xs text-[#8ea2c4] uppercase tracking-wider mb-3 font-semibold">Execution Intelligence</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              <div className="bg-[#18253a] rounded-lg p-3 border border-[#2a3a55]">
+                <p className="text-[#8ea2c4]">Structure-aware Stoploss Logic</p>
+                <p className="text-[#dbe7fb] mt-1">{signal.structureStopReason || 'N/A'}</p>
+              </div>
+              <div className="bg-[#18253a] rounded-lg p-3 border border-[#2a3a55]">
+                <p className="text-[#8ea2c4]">Target Logic</p>
+                <p className="text-[#dbe7fb] mt-1">{signal.targetLogicReason || 'N/A'}</p>
+              </div>
+              <div className="bg-[#18253a] rounded-lg p-3 border border-[#2a3a55]">
+                <p className="text-[#8ea2c4]">Execution Realism Score</p>
+                <p className="font-semibold text-white mt-1">
+                  {Number.isFinite(Number(signal.executionRealismScore)) ? `${Math.round(Number(signal.executionRealismScore))}%` : 'N/A'}
+                </p>
+              </div>
+              <div className="bg-[#18253a] rounded-lg p-3 border border-[#2a3a55]">
+                <p className="text-[#8ea2c4]">Survivability Score</p>
+                <p className="font-semibold text-white mt-1">
+                  {Number.isFinite(Number(signal.survivabilityScore)) ? `${Math.round(Number(signal.survivabilityScore))}%` : 'N/A'}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="mb-6 bg-[#111b2d] rounded-xl border border-[#2a3a55] p-4">
+            <p className="text-xs text-[#8ea2c4] uppercase tracking-wider mb-3 font-semibold">Market Structure and Orderflow</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              <div className="bg-[#18253a] rounded-lg p-3 border border-[#2a3a55]">
+                <p className="text-[#8ea2c4]">Structure</p>
+                <p className="text-[#dbe7fb] mt-1">{signal.marketStructure?.trendBias || signal.marketStructureSignal?.reason || 'N/A'}</p>
+              </div>
+              <div className="bg-[#18253a] rounded-lg p-3 border border-[#2a3a55]">
+                <p className="text-[#8ea2c4]">Regime</p>
+                <p className="text-[#dbe7fb] mt-1">{signal.regimeContext?.regime || signal.regime || 'N/A'}</p>
+              </div>
+              <div className="bg-[#18253a] rounded-lg p-3 border border-[#2a3a55]">
+                <p className="text-[#8ea2c4]">CVD</p>
+                <p className="text-[#dbe7fb] mt-1">{signal.cvdContext?.cvdDivergence || signal.realtimeContext?.cvdDivergence || 'N/A'}</p>
+              </div>
+              <div className="bg-[#18253a] rounded-lg p-3 border border-[#2a3a55]">
+                <p className="text-[#8ea2c4]">Liquidation</p>
+                <p className="text-[#dbe7fb] mt-1">
+                  {Array.isArray(signal.liquidationContext?.flags) && signal.liquidationContext.flags.length > 0
+                    ? signal.liquidationContext.flags.join(', ')
+                    : 'N/A'}
+                </p>
+              </div>
+              <div className="bg-[#18253a] rounded-lg p-3 border border-[#2a3a55]">
+                <p className="text-[#8ea2c4]">Depth</p>
+                <p className="text-[#dbe7fb] mt-1">
+                  {Array.isArray(signal.depthContext?.flags) && signal.depthContext.flags.length > 0
+                    ? signal.depthContext.flags.join(', ')
+                    : 'N/A'}
+                </p>
+              </div>
+              <div className="bg-[#18253a] rounded-lg p-3 border border-[#2a3a55]">
+                <p className="text-[#8ea2c4]">RR Analysis</p>
+                <p className="text-[#dbe7fb] mt-1">
+                  {signal.executionIntelligence?.rrAnalysis?.commentary
+                    || signal.rrAnalysis?.commentary
+                    || `RR ${rrRatio}`}
+                </p>
+              </div>
+            </div>
+          </div>
+
           <div className="mb-6">
             <TrendChart
               points={chartPoints}
@@ -441,21 +644,35 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
             <p>News: <span className="font-semibold text-white">{reason.sentiment || 'N/A'}</span></p>
           </div>
 
-          {signal.groqInsight && (
+          {(hasGroqAssessment || hasNvidiaAssessment) && (
+            <p className="mb-2 text-xs text-[#8ea2c4] uppercase tracking-wider font-semibold">Risk Assessment</p>
+          )}
+
+          {hasGroqAssessment && (
             <div className="mb-4 p-4 bg-[#0f1e35] border border-[#2a1e5f] rounded-xl">
               <p className="text-xs text-[#8ea2c4] uppercase tracking-wider mb-2 font-semibold flex items-center gap-2">
-                <span className="text-[#a78bfa]">🤖</span> Grok AI
+                <span className="text-[#a78bfa]">AI</span> Grok Validator
               </p>
-              <p className="text-sm text-[#c8d8f0] leading-relaxed">{signal.groqInsight}</p>
+              <div className="mt-2 mb-2">
+                <span className={`px-2 py-0.5 text-xs font-semibold rounded ${getTradeCallClass(signal.groqTradeCall)}`}>
+                  {signal.groqTradeCall || 'N/A'}
+                </span>
+              </div>
+              <p className="text-sm text-[#c8d8f0] leading-relaxed">{signal.groqInsight || 'No comment'}</p>
             </div>
           )}
 
-          {signal.nvidiaInsight && (
+          {hasNvidiaAssessment && (
             <div className="mb-4 p-4 bg-[#0f1f1f] border border-[#1f5f56] rounded-xl">
               <p className="text-xs text-[#8ea2c4] uppercase tracking-wider mb-2 font-semibold flex items-center gap-2">
-                <span className="text-[#58d7c4]">🤖</span> NVIDIA AI
+                <span className="text-[#58d7c4]">AI</span> NVIDIA Validator
               </p>
-              <p className="text-sm text-[#c8f0eb] leading-relaxed">{signal.nvidiaInsight}</p>
+              <div className="mt-2 mb-2">
+                <span className={`px-2 py-0.5 text-xs font-semibold rounded ${getTradeCallClass(signal.nvidiaTradeCall)}`}>
+                  {signal.nvidiaTradeCall || 'N/A'}
+                </span>
+              </div>
+              <p className="text-sm text-[#c8f0eb] leading-relaxed">{signal.nvidiaInsight || 'No comment'}</p>
               <p className="mt-2 text-xs text-[#8ec7bf]">
                 Confidence: <span className="font-semibold text-[#d4fff8]">{hasNvidiaConfidence ? `${Math.round(nvidiaConfidenceValue)}%` : 'N/A'}</span>
               </p>
@@ -484,13 +701,10 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
               <button
                 onClick={(e) => {
                   e.stopPropagation()
-                  if (!canTrade) {
-                    if (onRequireAuth) onRequireAuth()
-                    return
-                  }
+                  if (!canTrade || actionLoading === signal._id) return
                   onTake(signal._id)
                 }}
-                disabled={actionLoading === signal._id}
+                disabled={!canTrade || actionLoading === signal._id}
                 className="
                   flex-1 px-6 py-3 text-sm font-bold bg-[#19c37d] text-white
                   rounded-xl hover:bg-[#13a96b]
@@ -498,7 +712,7 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
                   transition-all transform hover:scale-[1.02] active:scale-[0.98]
                 "
               >
-                {actionLoading === signal._id ? 'Processing...' : canTrade ? 'Take Trade' : 'Login To Take Trade'}
+                {actionLoading === signal._id ? 'Processing...' : 'Take Trade'}
               </button>
             </div>
           ) : (
@@ -522,7 +736,7 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
   )
 }
 
-const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}, qualityApiFailed = false, canTrade = false, onRequireAuth }) => {
+const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}, qualityApiFailed = false, canTrade = true }) => {
   const [expandedId, setExpandedId] = useState(null)
   const generatedRef = useRef(null)
   const targetHitRef = useRef(null)
@@ -567,7 +781,6 @@ const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}
           qualityData={qualityBySymbol?.[signal.coin]}
           qualityApiFailed={qualityApiFailed}
           canTrade={canTrade}
-          onRequireAuth={onRequireAuth}
         />
       ))}
     </div>

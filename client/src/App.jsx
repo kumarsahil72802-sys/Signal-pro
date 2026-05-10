@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
-import { getSignals, takeSignal, getMarketData, getMarketQuality, getNews, login, getAuthMe, setAuthToken, clearAuthToken, getAuthToken } from './services/api'
-import { NavTabs, Market, News, Signals, Stats, Toast, AuthPanel } from './components'
+import { getSignals, takeSignal, getMarketData, getMarketQuality, getNews } from './services/api'
+import { NavTabs, Market, News, Signals, Stats, Toast } from './components'
 
 const CORE_REFRESH_MS = 12000
 const NEWS_REFRESH_MS = 30000
@@ -76,10 +76,6 @@ function App() {
   const [qualityApiFailed, setQualityApiFailed] = useState(false)
   const [toast, setToast] = useState(null)
   const [hasNewSignal, setHasNewSignal] = useState(false)
-  const [authUser, setAuthUser] = useState(null)
-  const [authLoading, setAuthLoading] = useState(false)
-  const [authError, setAuthError] = useState('')
-  const [authChecking, setAuthChecking] = useState(true)
 
   const prevSignalCount = useRef(0)
   const initialLoadDone = useRef(false)
@@ -96,57 +92,6 @@ function App() {
   const newsLoopTimerRef = useRef(null)
 
   const activeSignalCount = signals.filter((s) => s.status !== 'CLOSED').length
-  const isAuthenticated = Boolean(authUser)
-
-  const restoreSession = async () => {
-    const existingToken = getAuthToken()
-    if (!existingToken) return null
-
-    try {
-      const response = await getAuthMe()
-      const user = response.data?.user || null
-      setAuthUser(user)
-      setAuthError('')
-      return user
-    } catch {
-      clearAuthToken()
-      setAuthUser(null)
-      setAuthError('Session expired. Please login again.')
-      return null
-    }
-  }
-
-  const handleLogin = async (email, password) => {
-    setAuthLoading(true)
-    setAuthError('')
-    try {
-      const response = await login(email, password)
-      const token = String(response.data?.token || '').trim()
-      if (!token) {
-        throw new Error('Invalid login response')
-      }
-      setAuthToken(token)
-      const user = response.data?.user || null
-      setAuthUser(user)
-      setToast({ message: 'Login successful', type: 'success' })
-      await Promise.all([fetchSignals(), fetchMarket(), fetchNewsFeed()])
-      requestQuality(true)
-      return user
-    } catch (error) {
-      const message = error?.response?.data?.message || 'Login failed. Please check email/password.'
-      setAuthError(message)
-      return null
-    } finally {
-      setAuthLoading(false)
-    }
-  }
-
-  const handleLogout = () => {
-    clearAuthToken()
-    setAuthUser(null)
-    setAuthError('')
-    setToast({ message: 'Logged out', type: 'info' })
-  }
 
   const applySignalState = (newSignals) => {
     const safeSignals = Array.isArray(newSignals) ? newSignals : []
@@ -263,16 +208,12 @@ function App() {
 
     const initialTimer = setTimeout(() => {
       ;(async () => {
-        const user = await restoreSession()
-        if (user) {
-          await Promise.all([fetchSignals(), fetchMarket(), fetchNewsFeed()])
-        }
-        setAuthChecking(false)
+        await Promise.all([fetchSignals(), fetchMarket(), fetchNewsFeed()])
       })()
     }, 0)
 
     const runCoreLoop = async () => {
-      if (!coreInFlightRef.current && isAuthenticated) {
+      if (!coreInFlightRef.current) {
         coreInFlightRef.current = true
         try {
           await Promise.all([fetchSignals(), fetchMarket()])
@@ -285,7 +226,7 @@ function App() {
     }
 
     const runNewsLoop = async () => {
-      if (!newsInFlightRef.current && isAuthenticated) {
+      if (!newsInFlightRef.current) {
         newsInFlightRef.current = true
         try {
           await fetchNewsFeed()
@@ -299,10 +240,8 @@ function App() {
 
     const visibilityHandler = () => {
       if (document.visibilityState === 'visible') {
-        if (isAuthenticated) {
-          fetchSignals()
-          fetchMarket()
-        }
+        fetchSignals()
+        fetchMarket()
       }
     }
 
@@ -318,15 +257,9 @@ function App() {
       document.removeEventListener('visibilitychange', visibilityHandler)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAuthenticated])
+  }, [])
 
   const handleTake = async (id) => {
-    if (!isAuthenticated) {
-      setToast({ message: 'Please login to take trades.', type: 'warning' })
-      setActiveTab('signals')
-      return
-    }
-
     setActionLoading(id)
     try {
       await takeSignal(id)
@@ -334,11 +267,7 @@ function App() {
       requestQuality(true)
     } catch (err) {
       console.error('Failed to take signal:', err)
-      if (err?.response?.status === 401) {
-        clearAuthToken()
-        setAuthUser(null)
-        setAuthError('Session expired. Please login again.')
-      }
+      setToast({ message: 'Failed to take signal.', type: 'error' })
     } finally {
       setActionLoading(null)
     }
@@ -346,11 +275,6 @@ function App() {
 
   const handleSignalsClick = () => {
     setHasNewSignal(false)
-  }
-
-  const handleRequireAuth = () => {
-    setAuthError('Please login to perform write actions.')
-    setToast({ message: 'Login required for trade actions.', type: 'warning' })
   }
 
   const renderContent = () => {
@@ -375,8 +299,7 @@ function App() {
             onTake={handleTake}
             qualityBySymbol={qualityBySymbol}
             qualityApiFailed={qualityApiFailed}
-            canTrade={isAuthenticated}
-            onRequireAuth={handleRequireAuth}
+            canTrade
           />
         )
       case 'stats':
@@ -391,66 +314,6 @@ function App() {
           />
         )
     }
-  }
-
-  if (authChecking) {
-    return (
-      <div className="min-h-screen text-[#d7e1f3] relative overflow-hidden flex items-center justify-center">
-        <div className="pointer-events-none absolute inset-0 opacity-30" style={{
-          backgroundImage: 'linear-gradient(rgba(125,169,230,0.14) 1px, transparent 1px), linear-gradient(90deg, rgba(125,169,230,0.14) 1px, transparent 1px)',
-          backgroundSize: '48px 48px'
-        }} />
-        <div className="pointer-events-none absolute -left-20 top-24 h-72 w-72 rounded-full bg-[#ffbe2e]/20 blur-[120px]" />
-        <div className="pointer-events-none absolute right-0 top-10 h-96 w-96 rounded-full bg-[#5fd5ff]/16 blur-[130px]" />
-        <div className="pointer-events-none absolute -bottom-16 left-1/3 h-80 w-80 rounded-full bg-[#234a86]/24 blur-[150px]" />
-        <div className="relative flex items-center gap-3 rounded-2xl border border-[#2a466d] bg-[#101b2e]/90 px-6 py-4">
-          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-[#f0b90b]"></div>
-          <p className="text-sm text-[#c6d7f4]">Checking secure session...</p>
-        </div>
-      </div>
-    )
-  }
-
-  if (!isAuthenticated) {
-    return (
-      <div className="min-h-screen text-[#d7e1f3] relative overflow-hidden">
-        <div className="pointer-events-none absolute inset-0 opacity-30" style={{
-          backgroundImage: 'linear-gradient(rgba(125,169,230,0.14) 1px, transparent 1px), linear-gradient(90deg, rgba(125,169,230,0.14) 1px, transparent 1px)',
-          backgroundSize: '48px 48px'
-        }} />
-        <div className="pointer-events-none absolute -left-20 top-24 h-72 w-72 rounded-full bg-[#ffbe2e]/20 blur-[120px]" />
-        <div className="pointer-events-none absolute right-0 top-10 h-96 w-96 rounded-full bg-[#5fd5ff]/16 blur-[130px]" />
-        <div className="pointer-events-none absolute -bottom-16 left-1/3 h-80 w-80 rounded-full bg-[#234a86]/24 blur-[150px]" />
-
-        <div className="relative min-h-screen flex items-center justify-center px-4">
-          <div className="w-full max-w-xl">
-            <div className="mb-5 text-center">
-              <div className="cc-brand-shell mx-auto mb-3">
-                <span className="cc-brand-ring cc-brand-ring-a" />
-                <span className="cc-brand-ring cc-brand-ring-b" />
-                <img
-                  src="/coinchakra.jpeg"
-                  alt="CoinChakra Logo"
-                  className="cc-brand-core"
-                  loading="eager"
-                />
-              </div>
-              <h1 className="text-3xl font-extrabold tracking-tight text-white">CoinChakra Secure Access</h1>
-              <p className="mt-2 text-sm text-[#9cb6dc]">Login required to enter the signal command grid.</p>
-            </div>
-
-            <AuthPanel
-              authenticated={false}
-              userEmail=""
-              loading={authLoading}
-              error={authError}
-              onLogin={handleLogin}
-              onLogout={handleLogout}
-            />
-          </div>
-        </div>
-      </div>
-    )
   }
 
   return (

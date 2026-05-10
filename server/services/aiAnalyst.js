@@ -2,6 +2,12 @@ const { analyzePerformance } = require('./aiLearning');
 const { askGroqWithMeta } = require('./groqService');
 const { askNvidiaWithMeta } = require('./nvidiaService');
 const { settings } = require('./signalEngine/config');
+const { buildMachineContext } = require('./signalEngine/generatorParts/machineContext');
+const {
+  normalizeAiValidation,
+  buildUnavailableValidation,
+  createTriCoreDecision
+} = require('./signalEngine/generatorParts/triCoreEngine');
 
 const {
   SIGNAL_AI_MODE,
@@ -12,12 +18,21 @@ const {
   SIGNAL_AI_TRIGGER_MIN_CONFIDENCE
 } = settings;
 
-/**
- * AI Analyst Layer for signal evaluation and decision making.
- * Returns enriched signal with aiScore, aiDecision, and aiMessage.
- */
 function clampScore(value) {
   return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function normalizeTradeCall(rawValue) {
+  if (rawValue == null) return null;
+  const normalized = String(rawValue).trim().toUpperCase();
+  if (['TAKE', 'WAIT', 'SKIP'].includes(normalized)) return normalized;
+  return null;
+}
+
+function normalizeAiDecisionFromTrade(tradeDecision) {
+  if (tradeDecision === 'TAKE') return 'STRONG_APPROVE';
+  if (tradeDecision === 'WAIT') return 'WEAK_APPROVE';
+  return 'REJECT';
 }
 
 function parseAiConfidenceScore(rawValue) {
@@ -39,6 +54,162 @@ function parseAiConfidenceScore(rawValue) {
   return clampScore(parsed);
 }
 
+function toFiniteNumber(value, fallback = null) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function resolvePriceDecimals(price) {
+  if (!Number.isFinite(price) || price <= 0) return 4;
+  if (price >= 1000) return 2;
+  if (price >= 100) return 3;
+  if (price >= 1) return 4;
+  if (price >= 0.1) return 5;
+  if (price >= 0.01) return 6;
+  if (price >= 0.001) return 7;
+  return 8;
+}
+
+function roundPrice(value, decimals) {
+  if (!Number.isFinite(value)) return null;
+  return Number(value.toFixed(decimals));
+}
+
+function resolveRegimeMinRr(regime = '') {
+  switch (String(regime || '').toUpperCase()) {
+    case 'BREAKOUT':
+      return 1.4;
+    case 'TRENDING':
+      return 1.35;
+    case 'HIGH_VOLATILITY':
+      return 1.3;
+    case 'LOW_VOLATILITY':
+      return 1.2;
+    case 'CHOPPY':
+      return 1.2;
+    case 'RANGING':
+    default:
+      return 1.2;
+  }
+}
+
+function isDirectionalPricesValid(trend, entryPrice, targetPrice, stopLossPrice) {
+  if (!Number.isFinite(entryPrice) || !Number.isFinite(targetPrice) || !Number.isFinite(stopLossPrice)) return false;
+  if (trend === 'BUY') return targetPrice > entryPrice && stopLossPrice < entryPrice;
+  if (trend === 'SELL') return targetPrice < entryPrice && stopLossPrice > entryPrice;
+  return false;
+}
+
+function buildAiRiskCandidate(source, targetPrice, stopLossPrice, context = {}) {
+  const {
+    trend,
+    entryPrice,
+    atr,
+    minRequiredRr,
+    machineRisk,
+    machineReward
+  } = context;
+
+  if (!isDirectionalPricesValid(trend, entryPrice, targetPrice, stopLossPrice)) {
+    return null;
+  }
+
+  const risk = Math.abs(entryPrice - stopLossPrice);
+  const reward = Math.abs(targetPrice - entryPrice);
+  if (!(risk > 0) || !(reward > 0)) return null;
+
+  const rr = reward / risk;
+  const safeAtr = Number.isFinite(atr) && atr > 0 ? atr : entryPrice * 0.0055;
+  const minStopDistance = Math.max(safeAtr * 0.45, entryPrice * 0.001);
+  const maxStopDistance = Math.max(safeAtr * 4.2, entryPrice * 0.06);
+  const maxTargetDistance = Math.max(safeAtr * 8, entryPrice * 0.14);
+
+  if (risk < minStopDistance || risk > maxStopDistance) return null;
+  if (reward > maxTargetDistance) return null;
+
+  if (Number.isFinite(machineRisk) && machineRisk > 0 && risk < machineRisk * 0.45) return null;
+  if (Number.isFinite(machineReward) && machineReward > 0 && reward > machineReward * 2.6) return null;
+  if (rr < minRequiredRr) return null;
+
+  return {
+    source,
+    targetPrice,
+    stopLossPrice,
+    rr,
+    risk,
+    reward
+  };
+}
+
+function resolveAiRiskPlan(params = {}) {
+  const {
+    trend,
+    entryPrice,
+    machineTarget,
+    machineStopLoss,
+    regime,
+    atr,
+    grokValidation,
+    nvidiaValidation
+  } = params;
+
+  const safeEntry = toFiniteNumber(entryPrice);
+  if (!Number.isFinite(safeEntry) || safeEntry <= 0) {
+    return { applied: false, reason: 'invalid_entry_price' };
+  }
+
+  const decimals = resolvePriceDecimals(safeEntry);
+  const minRequiredRr = resolveRegimeMinRr(regime);
+  const machineRisk = Math.abs(safeEntry - toFiniteNumber(machineStopLoss, safeEntry));
+  const machineReward = Math.abs(toFiniteNumber(machineTarget, safeEntry) - safeEntry);
+
+  const context = {
+    trend,
+    entryPrice: safeEntry,
+    atr: toFiniteNumber(atr, safeEntry * 0.0055),
+    minRequiredRr,
+    machineRisk,
+    machineReward
+  };
+
+  const grokCandidate = buildAiRiskCandidate(
+    'grok',
+    toFiniteNumber(grokValidation?.target_price),
+    toFiniteNumber(grokValidation?.stop_loss_price),
+    context
+  );
+  const nvidiaCandidate = buildAiRiskCandidate(
+    'nvidia',
+    toFiniteNumber(nvidiaValidation?.target_price),
+    toFiniteNumber(nvidiaValidation?.stop_loss_price),
+    context
+  );
+
+  const candidates = [grokCandidate, nvidiaCandidate].filter(Boolean);
+  if (grokCandidate && nvidiaCandidate) {
+    const consensusTarget = (grokCandidate.targetPrice + nvidiaCandidate.targetPrice) / 2;
+    const consensusStop = (grokCandidate.stopLossPrice + nvidiaCandidate.stopLossPrice) / 2;
+    const consensusCandidate = buildAiRiskCandidate('consensus', consensusTarget, consensusStop, context);
+    if (consensusCandidate) candidates.push(consensusCandidate);
+  }
+
+  if (candidates.length === 0) {
+    return { applied: false, reason: 'no_valid_ai_target_stop' };
+  }
+
+  candidates.sort((a, b) => b.rr - a.rr);
+  const winner = candidates[0];
+
+  return {
+    applied: true,
+    source: winner.source,
+    targetPrice: roundPrice(winner.targetPrice, decimals),
+    stopLossPrice: roundPrice(winner.stopLossPrice, decimals),
+    rr: Number(winner.rr.toFixed(3)),
+    minRequiredRr
+  };
+}
+
 function deriveDecision(score, forceReject = false) {
   if (forceReject) return 'REJECT';
   if (score >= 75) return 'STRONG_APPROVE';
@@ -47,60 +218,9 @@ function deriveDecision(score, forceReject = false) {
   return 'REJECT';
 }
 
-function formatNumber(value, decimals = 2) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return 'N/A';
-  return parsed.toFixed(decimals);
-}
-
 function formatValue(value) {
   if (value == null || value === '') return 'N/A';
   return String(value);
-}
-
-function buildRiskContext(signal, macroSummary, orderBookSummary) {
-  const reason = signal.reason || {};
-  const breakdown = signal.confidenceBreakdown || {};
-
-  return `Coin: ${formatValue(signal.coin)}
-Type: ${formatValue(signal.type)}
-Entry: ${formatValue(signal.entryPrice)}, Target: ${formatValue(signal.target)}, StopLoss: ${formatValue(signal.stopLoss)}
-MachineConfidence: ${formatValue(signal.confidence)}%
-SignalQuality: ${formatValue(signal.signalQuality || signal.trendStrength)}
-AIHeuristicScore: ${formatValue(signal.aiScore)}/100
-AIDecision: ${formatValue(signal.aiDecision)}
-Trigger: ${formatValue(signal.trigger)}
-Regime: ${formatValue(signal.regime)}
-HigherTimeframeTrend: ${formatValue(signal.higherTimeframeTrend)}
-RSI: ${formatNumber(signal.rsi)}, PrevRSI: ${formatNumber(signal.prevRsi)}
-SentimentScore: ${formatNumber(signal.sentimentScore, 3)}
-VolumeSpike: ${signal.volumeSpike ? 'YES' : 'NO'}
-BTCTrend: ${formatValue(signal.btcTrend)}
-LateEntry: ${signal.isLateEntry ? 'YES' : 'NO'}
-ReasonTrend: ${formatValue(reason.trend)}
-ReasonMomentum: ${formatValue(reason.momentum)}
-ReasonVolume: ${formatValue(reason.volume)}
-ReasonRSI: ${formatValue(reason.rsi)}
-ReasonMACD: ${formatValue(reason.macd)}
-ReasonExecution: ${formatValue(reason.execution)}
-ReasonSlippageRisk: ${formatValue(reason.slippageRisk)}
-VolumeConfirmed: ${formatValue(reason.volumeConfirmed)}
-DeltaRatio: ${formatValue(reason.deltaRatio)}
-NewsSummary: ${formatValue(signal.newsSummary || reason.sentiment)}
-ConfidenceBreakdownTechnical: ${formatValue(breakdown.technical)}
-ConfidenceBreakdownMarket: ${formatValue(breakdown.market)}
-ConfidenceBreakdownSentiment: ${formatValue(breakdown.sentiment)}
-ConfidenceBreakdownBonus: ${formatValue(breakdown.bonus)}
-ConfidenceBreakdownPenalty: ${formatValue(breakdown.penalty)}
-MacroSummary: ${macroSummary}
-OrderBookSummary: ${orderBookSummary}
-FundingRate: ${formatNumber(signal.futuresData?.fundingRate, 6)}
-LongShortRatio: ${formatNumber(signal.futuresData?.longShortRatio, 3)}
-TakerBuySellRatio: ${formatNumber(signal.futuresData?.takerBuySellRatio, 3)}
-OpenInterest: ${formatNumber(signal.futuresData?.openInterest, 0)}
-TakerBuyVolume: ${formatNumber(signal.takerBuyVolume, 2)}
-NumberOfTrades: ${formatValue(signal.numberOfTrades)}
-AIHeuristicNotes: ${formatValue(signal.aiMessage)}`;
 }
 
 function applyMacroAdjustments(signal) {
@@ -198,13 +318,11 @@ function applyOrderBookAdjustments(signal) {
 }
 
 function analyzeSignal(signal) {
-  // Guard against missing signal
   if (!signal) return null;
 
   let score = 50;
   const message = [];
 
-  // TREND QUALITY
   if (signal.trendStrength === 'STRONG') {
     score += 15;
     message.push('Strong trend');
@@ -213,25 +331,21 @@ function analyzeSignal(signal) {
     message.push('Weak trend');
   }
 
-  // ENTRY TIMING
   if (signal.isLateEntry) {
     score -= 20;
     message.push('Late entry risk');
   }
 
-  // VOLUME CONFIRMATION
   if (signal.volumeSpike) {
     score += 10;
     message.push('Volume supports move');
   }
 
-  // BTC CONFLICT
   if (signal.btcTrend === 'STRONG_BEARISH' && signal.type === 'BUY') {
     score -= 15;
     message.push('BTC against trade');
   }
 
-  // RSI-based scoring
   if (signal.rsi !== undefined) {
     if (signal.type === 'BUY' && signal.rsi >= 30 && signal.rsi <= 50) {
       score += 8;
@@ -245,7 +359,6 @@ function analyzeSignal(signal) {
     }
   }
 
-  // Confidence-based scoring
   if (signal.confidence >= 80) {
     score += 8;
     message.push('High confidence signal');
@@ -254,7 +367,6 @@ function analyzeSignal(signal) {
     message.push('Low confidence');
   }
 
-  // Trigger quality bonus
   if (signal.trigger === 'VOLATILITY_BREAKOUT') {
     score += 5;
     message.push('Breakout trigger');
@@ -263,12 +375,10 @@ function analyzeSignal(signal) {
     message.push('EMA crossover');
   }
 
-  // Macro trend integration (DXY + S&P500)
   const macroAdjustments = applyMacroAdjustments(signal);
   score += macroAdjustments.delta;
   message.push(...macroAdjustments.notes);
 
-  // Order book liquidity integration (whale wall + bid/ask ratio)
   const orderBookAdjustments = applyOrderBookAdjustments(signal);
   score += orderBookAdjustments.delta;
   message.push(...orderBookAdjustments.notes);
@@ -305,24 +415,29 @@ function buildPerformanceContext(perf, signal) {
   return `Trigger(${trigger}) W/L:${triggerWin}/${triggerLoss} WinRate:${triggerRate}% | Coin+Trigger(${symbol}) W/L:${symbolWin}/${symbolLoss} WinRate:${symbolRate}%`;
 }
 
-function buildEnrichmentPrompt(analyzed, fullRiskContext, performanceContext) {
-  return `You are a crypto trading signal evaluator.
-Return ONLY valid JSON with this exact shape:
-{"confidence_percent": <integer 0-100>, "risk_note": "<max 40 words>"}
+function buildEnrichmentPrompt(_analyzed, machineContext, performanceContext) {
+  return `You are a strict crypto signal validation engine.
+Role: validate the machine signal against market context, detect contradictions, and issue a trading verdict.
 
-Rules:
-- confidence_percent must be an integer between 0 and 100.
-- risk_note must be concise and practical.
-- No markdown. No extra keys. No explanation outside JSON.
+Return STRICT JSON ONLY with this exact schema:
+{"ai_confidence":0,"agreement_score":0,"validator_decision":"AGREE|PARTIAL|DISAGREE","trade_decision":"TAKE|WAIT|SKIP","major_contradictions":[],"minor_risks":[],"confidence_adjustment":0,"target_price":0,"stop_loss_price":0,"summary":"max 30 words"}
 
-Recent Strategy Performance:
+Validation rules:
+1) Compare machine confidence versus context quality.
+2) Detect contradictions: fake breakout, weak trend, poor RR, weak liquidity, CVD divergence, regime mismatch.
+3) If 2 or more major contradictions exist, avoid TAKE.
+4) Keep summary <= 30 words.
+5) Return target_price and stop_loss_price only if they improve setup quality; otherwise return null.
+6) No markdown, no explanation, no extra keys.
+
+Recent strategy performance:
 ${performanceContext}
 
-Full Signal Context:
-${fullRiskContext}`;
+Machine context JSON:
+${JSON.stringify(machineContext)}`;
 }
 
-function parseAiEnrichmentPayload(rawText) {
+function parseAiValidatorPayload(rawText, provider = 'unknown') {
   if (!rawText) return null;
   const text = String(rawText).trim();
 
@@ -341,12 +456,46 @@ function parseAiEnrichmentPayload(rawText) {
 
   if (!parsed || typeof parsed !== 'object') return null;
 
-  const confidence = parseAiConfidenceScore(parsed.confidence_percent);
-  const riskNote = typeof parsed.risk_note === 'string' ? parsed.risk_note.trim() : '';
+  const confidence = parseAiConfidenceScore(parsed.ai_confidence);
+  const agreement = parseAiConfidenceScore(parsed.agreement_score);
+  const normalized = normalizeAiValidation({
+    ai_confidence: confidence,
+    agreement_score: agreement,
+    validator_decision: parsed.validator_decision,
+    trade_decision: parsed.trade_decision,
+    major_contradictions: parsed.major_contradictions,
+    minor_risks: parsed.minor_risks,
+    confidence_adjustment: parsed.confidence_adjustment,
+    target_price: parsed.target_price,
+    stop_loss_price: parsed.stop_loss_price,
+    summary: parsed.summary
+  }, provider);
+
+  return normalized;
+}
+
+async function runValidator(provider, askFn, prompt) {
+  const request = await askFn(prompt, null, {
+    retryCount: SIGNAL_AI_RETRY_COUNT,
+    retryBackoffMs: SIGNAL_AI_RETRY_BACKOFF_MS,
+    timeoutMs: SIGNAL_AI_TIMEOUT_MS
+  });
+
+  const parsed = parseAiValidatorPayload(request.text, provider);
+  if (parsed) {
+    return {
+      status: 'SUCCESS',
+      attempts: request.attempts || 0,
+      error: null,
+      validation: parsed
+    };
+  }
 
   return {
-    confidence,
-    riskNote
+    status: 'FALLBACK',
+    attempts: request.attempts || 0,
+    error: request.error || 'invalid_ai_response_payload',
+    validation: buildUnavailableValidation(provider, request.error || 'invalid_ai_response_payload')
   };
 }
 
@@ -403,96 +552,186 @@ async function enhancedAnalyze(signal, runtime = {}) {
   }
 
   analyzed.aiScore = clampScore(analyzed.aiScore);
-  analyzed.aiDecision = deriveDecision(analyzed.aiScore, analyzed.blockedByLiquidity === true);
-  analyzed.aiStatus = 'SKIPPED';
-  analyzed.aiAttempts = 0;
-  analyzed.aiError = null;
-  analyzed.nvidiaConfidence = null;
-  analyzed.nvidiaInsight = '';
-  analyzed.nvidiaStatus = 'SKIPPED';
-  analyzed.nvidiaAttempts = 0;
-  analyzed.nvidiaError = null;
 
-  const machineConfidence = Number(analyzed.confidence);
-  if (!Number.isFinite(machineConfidence) || machineConfidence < SIGNAL_AI_TRIGGER_MIN_CONFIDENCE) {
-    analyzed.aiConfidence = Number.isFinite(machineConfidence) ? machineConfidence : (analyzed.aiScore ?? null);
-    analyzed.groqInsight = '';
-    analyzed.aiStatus = 'SKIPPED';
-    analyzed.aiError = 'below_ai_trigger_confidence';
-    analyzed.nvidiaStatus = 'SKIPPED';
-    analyzed.nvidiaError = 'below_ai_trigger_confidence';
-    return analyzed;
-  }
+  const validatorReasons = Array.isArray(analyzed.guardrailFlags)
+    ? [...new Set(analyzed.guardrailFlags)]
+    : [];
 
-  const macroSummary = analyzed.macroTrends
-    ? `DXY:${analyzed.macroTrends.dxy?.trend ?? 'N/A'} (${Number(analyzed.macroTrends.dxy?.changePct || 0).toFixed(2)}%), SP500:${analyzed.macroTrends.sp500?.trend ?? 'N/A'} (${Number(analyzed.macroTrends.sp500?.changePct || 0).toFixed(2)}%)`
-    : 'N/A';
+  const machineContext = buildMachineContext({
+    coin: analyzed.coin,
+    trend: analyzed.type,
+    signalData: analyzed,
+    machineConfidence: analyzed.confidence,
+    technicalScore: analyzed.confidenceBreakdown?.technical,
+    marketScore: analyzed.confidenceBreakdown?.market,
+    rsi: analyzed.rsi,
+    macdData: analyzed.indicators?.macd || {
+      macdLine: null,
+      signalLine: null,
+      histogram: null
+    },
+    advancedSignal: {
+      ema9: analyzed.indicators?.ema9,
+      ema21: analyzed.indicators?.ema21,
+      slope: analyzed.indicators?.emaSlope,
+      proximity: analyzed.indicators?.emaProximity,
+      zone: analyzed.indicators?.emaZone
+    },
+    atr: analyzed.atr,
+    atrPct: analyzed.indicators?.atrPct,
+    bbData: {
+      upper: analyzed.indicators?.bbUpper,
+      lower: analyzed.indicators?.bbLower,
+      middle: analyzed.indicators?.bbMiddle
+    },
+    bbWidthPercent: analyzed.indicators?.bbWidthPercent,
+    bbExpanding: analyzed.indicators?.bbExpanding,
+    volumeData: {
+      ratio: analyzed.indicators?.volumeRatio,
+      current: analyzed.indicators?.volume,
+      average: analyzed.indicators?.volumeAvg,
+      isSpike: analyzed.volumeSpike
+    },
+    volumeDelta: {
+      deltaRatio: Number(analyzed.reason?.deltaRatio),
+      buyDominant: analyzed.reason?.volumeConfirmed === 'BUY_DOMINANT',
+      sellDominant: analyzed.reason?.volumeConfirmed === 'SELL_DOMINANT'
+    },
+    srContext: analyzed.supportResistance,
+    adxContext: analyzed.adxContext,
+    structureAnalysis: analyzed.marketStructure,
+    structureContext: analyzed.marketStructureSignal,
+    regimeContext: analyzed.regimeContext,
+    cvdContext: analyzed.cvdContext ? {
+      metrics: analyzed.cvdContext,
+      divergence: analyzed.cvdContext?.divergence !== 'NONE',
+      aligned: analyzed.cvdContext?.divergence === 'NONE'
+    } : null,
+    liquidationContext: analyzed.liquidationContext,
+    orderBookLiquidity: analyzed.orderBookLiquidity,
+    depthContext: analyzed.depthContext,
+    futuresData: analyzed.futuresData,
+    realtimeContext: analyzed.realtimeContext,
+    sentimentResult: {
+      label: analyzed.sentimentScore > 0.3 ? 'BULLISH' : analyzed.sentimentScore < -0.3 ? 'BEARISH' : 'NEUTRAL',
+      source: analyzed.sentimentBreakdown?.source || 'unknown'
+    },
+    sentimentScore: analyzed.sentimentScore,
+    riskModel: analyzed.riskModel,
+    rrAnalysis: analyzed.rrAnalysis,
+    executionIntelligence: analyzed.executionIntelligence,
+    tradeQualityGrade: analyzed.tradeQualityGrade,
+    riskGrade: analyzed.riskGrade,
+    validatorReasons,
+    machineValidatorPassed: analyzed.aiScore >= 50,
+    machineValidatorScore: analyzed.aiScore,
+    machineValidatorDecision: deriveDecision(analyzed.aiScore, analyzed.blockedByLiquidity === true)
+  });
 
-  const orderBookSummary = analyzed.orderBookLiquidity
-    ? `Bid/Ask Ratio:${Number(analyzed.orderBookLiquidity.bidAskVolumeRatio || 0).toFixed(2)}, AskWall:${analyzed.orderBookLiquidity.massiveAskWallDetected ? 'YES' : 'NO'}, Blocked:${analyzed.orderBookLiquidity.blockedByLiquidity ? 'YES' : 'NO'}`
-    : 'N/A';
-
-  const fullRiskContext = buildRiskContext(analyzed, macroSummary, orderBookSummary);
   const performanceContext = buildPerformanceContext(perf, analyzed);
-  const enrichmentPrompt = buildEnrichmentPrompt(analyzed, fullRiskContext, performanceContext);
+  const enrichmentPrompt = buildEnrichmentPrompt(analyzed, machineContext, performanceContext);
+
+  let grokResult = {
+    status: 'SKIPPED',
+    attempts: 0,
+    error: 'skipped',
+    validation: buildUnavailableValidation('grok', 'skipped')
+  };
+  let nvidiaResult = {
+    status: 'SKIPPED',
+    attempts: 0,
+    error: 'skipped',
+    validation: buildUnavailableValidation('nvidia', 'skipped')
+  };
 
   const shouldRunSyncEnrichment = SIGNAL_AI_ENRICHMENT_TIMING === 'SYNC';
-  if (!shouldRunSyncEnrichment) {
-    analyzed.aiConfidence = analyzed.confidence ?? analyzed.aiScore ?? null;
-    analyzed.groqInsight = '';
-    analyzed.aiStatus = 'SKIPPED';
-    analyzed.aiError = 'sync_enrichment_disabled';
-    analyzed.nvidiaStatus = 'SKIPPED';
-    analyzed.nvidiaError = 'sync_enrichment_disabled';
-    return analyzed;
+  const machineConfidence = Number(analyzed.confidence);
+  const passTrigger = Number.isFinite(machineConfidence);
+
+  if (shouldRunSyncEnrichment && passTrigger) {
+    [grokResult, nvidiaResult] = await Promise.all([
+      runValidator('grok', askGroqWithMetaFn, enrichmentPrompt),
+      runValidator('nvidia', askNvidiaWithMetaFn, enrichmentPrompt)
+    ]);
+  } else {
+    const skipReason = !shouldRunSyncEnrichment ? 'sync_enrichment_disabled' : `invalid_machine_confidence_threshold_${SIGNAL_AI_TRIGGER_MIN_CONFIDENCE}`;
+    grokResult = {
+      status: 'SKIPPED',
+      attempts: 0,
+      error: skipReason,
+      validation: buildUnavailableValidation('grok', skipReason)
+    };
+    nvidiaResult = {
+      status: 'SKIPPED',
+      attempts: 0,
+      error: skipReason,
+      validation: buildUnavailableValidation('nvidia', skipReason)
+    };
   }
 
-  const fallbackConfidence = analyzed.confidence ?? analyzed.aiScore ?? null;
-  const fallbackInsight = 'AI enrichment fallback: machine signal kept as source of truth.';
-  const nvidiaFallbackInsight = 'NVIDIA enrichment fallback: provider response unavailable.';
-  const aiRequest = await askGroqWithMetaFn(enrichmentPrompt, null, {
-    retryCount: SIGNAL_AI_RETRY_COUNT,
-    retryBackoffMs: SIGNAL_AI_RETRY_BACKOFF_MS,
-    timeoutMs: SIGNAL_AI_TIMEOUT_MS
+  const triCore = createTriCoreDecision({
+    machineContext,
+    grokValidation: grokResult.validation,
+    nvidiaValidation: nvidiaResult.validation
+  });
+  const aiRiskPlan = resolveAiRiskPlan({
+    trend: analyzed.type,
+    entryPrice: analyzed.entryPrice,
+    machineTarget: analyzed.target,
+    machineStopLoss: analyzed.stopLoss,
+    regime: analyzed.regimeContext?.regime || analyzed.regime,
+    atr: analyzed.indicators?.atr,
+    grokValidation: triCore.grok,
+    nvidiaValidation: triCore.nvidia
   });
 
-  analyzed.aiAttempts = aiRequest.attempts || 0;
+  analyzed.aiConfidence = triCore.finalConfidence;
+  analyzed.aiDecision = normalizeAiDecisionFromTrade(triCore.finalTradeDecision);
+  analyzed.aiMessage = `${triCore.summary} | ${formatValue(triCore.contradictionList.slice(0, 3).join(', ') || 'no critical contradictions')}`;
+  analyzed.aiStatus = grokResult.status;
+  analyzed.aiAttempts = grokResult.attempts;
+  analyzed.aiError = grokResult.error === 'skipped' ? null : grokResult.error;
+  analyzed.groqTradeCall = normalizeTradeCall(triCore.grok.trade_decision);
+  analyzed.groqInsight = triCore.grok.summary || '';
 
-  const parsedEnrichment = parseAiEnrichmentPayload(aiRequest.text);
-  if (parsedEnrichment?.confidence != null) {
-    analyzed.aiConfidence = parsedEnrichment.confidence;
-    analyzed.groqInsight = parsedEnrichment.riskNote || fallbackInsight;
-    analyzed.aiStatus = 'SUCCESS';
-    analyzed.aiError = null;
-  } else {
-    analyzed.aiConfidence = fallbackConfidence;
-    analyzed.groqInsight = fallbackInsight;
-    analyzed.aiStatus = 'FALLBACK';
-    analyzed.aiError = aiRequest.error || 'invalid_ai_response_payload';
-  }
+  analyzed.nvidiaConfidence = triCore.nvidia.ai_confidence;
+  analyzed.nvidiaTradeCall = normalizeTradeCall(triCore.nvidia.trade_decision);
+  analyzed.nvidiaInsight = triCore.nvidia.summary || '';
+  analyzed.nvidiaStatus = nvidiaResult.status;
+  analyzed.nvidiaAttempts = nvidiaResult.attempts;
+  analyzed.nvidiaError = nvidiaResult.error === 'skipped' ? null : nvidiaResult.error;
 
-  const nvidiaRequest = await askNvidiaWithMetaFn(enrichmentPrompt, null, {
-    retryCount: SIGNAL_AI_RETRY_COUNT,
-    retryBackoffMs: SIGNAL_AI_RETRY_BACKOFF_MS,
-    timeoutMs: SIGNAL_AI_TIMEOUT_MS
-  });
+  analyzed.machineContext = machineContext;
+  analyzed.grokValidation = {
+    ...triCore.grok,
+    status: grokResult.status,
+    attempts: grokResult.attempts,
+    error: grokResult.error
+  };
+  analyzed.nvidiaValidation = {
+    ...triCore.nvidia,
+    status: nvidiaResult.status,
+    attempts: nvidiaResult.attempts,
+    error: nvidiaResult.error
+  };
+  analyzed.triCore = {
+    finalConfidence: triCore.finalConfidence,
+    finalTradeDecision: triCore.finalTradeDecision,
+    agreementScore: triCore.agreementScore,
+    contradictionList: triCore.contradictionList,
+    majorContradictions: triCore.majorContradictions,
+    minorRisks: triCore.minorRisks,
+    reliability: triCore.reliability
+  };
+  analyzed.aiRiskPlan = aiRiskPlan;
+  analyzed.finalTradeDecision = triCore.finalTradeDecision;
+  analyzed.aiAgreementScore = triCore.agreementScore;
+  analyzed.contradictionList = triCore.contradictionList;
+  analyzed.validatorReasons = machineContext.validatorReasons;
+  analyzed.finalConfidenceBreakdown = triCore.confidenceBreakdown;
 
-  analyzed.nvidiaAttempts = nvidiaRequest.attempts || 0;
-  const parsedNvidiaEnrichment = parseAiEnrichmentPayload(nvidiaRequest.text);
-  if (parsedNvidiaEnrichment?.confidence != null) {
-    analyzed.nvidiaConfidence = parsedNvidiaEnrichment.confidence;
-    analyzed.nvidiaInsight = parsedNvidiaEnrichment.riskNote || nvidiaFallbackInsight;
-    analyzed.nvidiaStatus = 'SUCCESS';
-    analyzed.nvidiaError = null;
-  } else {
-    analyzed.nvidiaConfidence = null;
-    analyzed.nvidiaInsight = nvidiaFallbackInsight;
-    analyzed.nvidiaStatus = 'FALLBACK';
-    analyzed.nvidiaError = nvidiaRequest.error || 'invalid_ai_response_payload';
-  }
-
-  if (SIGNAL_AI_MODE !== 'ADVISORY') {
-    analyzed.aiMessage = `${analyzed.aiMessage || ''} | AI mode:${SIGNAL_AI_MODE} not fully enabled; running advisory behavior.`.trim();
+  if (SIGNAL_AI_MODE !== 'GATED') {
+    analyzed.aiMessage = `${analyzed.aiMessage} | mode:${SIGNAL_AI_MODE}`;
   }
 
   return analyzed;
@@ -500,7 +739,8 @@ async function enhancedAnalyze(signal, runtime = {}) {
 
 module.exports = {
   enhancedAnalyze,
-  parseAiEnrichmentPayload,
+  parseAiEnrichmentPayload: parseAiValidatorPayload,
+  parseAiValidatorPayload,
   buildEnrichmentPrompt,
   buildPerformanceContext
 };

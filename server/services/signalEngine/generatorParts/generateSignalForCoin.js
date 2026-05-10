@@ -1,5 +1,6 @@
 const { getKlines } = require('../../binanceService');
 const { getFuturesContext } = require('../../futuresService');
+const { getRealtimeSignalContext } = require('../../binanceRealtimeService');
 const { getExecutionQualityForSymbols } = require('../../executionQualityService');
 const { saveTradeSnapshot } = require('../../tradeService');
 const Signal = require('../../../models/Signal');
@@ -31,6 +32,15 @@ const {
   calculateMACD,
   calculateBollingerBands,
   detect4HTrend,
+  calculateADX,
+  analyzeSupportResistance,
+  analyzeMarketStructure,
+  evaluateStructureForSignal,
+  evaluateAdxForSignal,
+  detectMarketRegimeAdvanced,
+  evaluateCvdForSignal,
+  detectLiquidationPressure,
+  calibrateConfidence,
   calcTechnicalScore,
   calcMarketScore,
   calcConfidenceBoost,
@@ -44,10 +54,11 @@ const {
   calcWeakIndicatorPenalty,
   calcNewsSentiment,
   calculateSentimentAdjustment,
-  calculateATR
+  calculateATR,
+  applyFuturesAdjustment,
+  applyRealtimeAdjustment
 } = require('../analysis');
 const {
-  buildSignalData,
   getReasonLabels,
   getSignalQuality,
   runQualityFilters,
@@ -55,6 +66,12 @@ const {
 } = require('./core');
 const { getOrderBookLiquidityForSignal } = require('./orderBook');
 const { applyGuardrailPenalties } = require('./guardrails');
+const { buildRiskManagedSignalData } = require('./riskEngine');
+const { validateFinalSignalQuality } = require('./signalQualityValidator');
+const {
+  evaluateExecutionIntelligence,
+  finalizeExecutionDecision
+} = require('./executionIntelligenceEngine');
 
 const {
   COOLDOWN_MS,
@@ -66,6 +83,8 @@ const {
   SIGNAL_USE_BTC_HARD_BLOCK,
   SIGNAL_USE_4H_HARD_FILTER,
   SIGNAL_USE_EXECUTION_QUALITY,
+  SIGNAL_USE_FUTURES_CONTEXT,
+  SIGNAL_USE_REALTIME_CONTEXT,
   SIGNAL_LIQUIDITY_REJECT_MODE,
   SIGNAL_AI_REJECT_MODE,
   SIGNAL_VALIDITY_MS,
@@ -76,6 +95,142 @@ function clampConfidence(value) {
   return Math.max(0, Math.min(100, value));
 }
 
+function toNullableNumber(value, decimals = null) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  if (Number.isFinite(decimals)) {
+    return Number(parsed.toFixed(decimals));
+  }
+  return parsed;
+}
+
+function computeRrFromPrices(entryPrice, target, stopLoss) {
+  const entry = Number(entryPrice);
+  const targetPrice = Number(target);
+  const stop = Number(stopLoss);
+  if (!Number.isFinite(entry) || !Number.isFinite(targetPrice) || !Number.isFinite(stop)) return null;
+
+  const risk = Math.abs(entry - stop);
+  const reward = Math.abs(targetPrice - entry);
+  if (!(risk > 0) || !(reward > 0)) return null;
+
+  return {
+    risk,
+    reward,
+    ratio: reward / risk
+  };
+}
+
+function isDirectionalRrValid(trend, entryPrice, target, stopLoss) {
+  const entry = Number(entryPrice);
+  const targetPrice = Number(target);
+  const stop = Number(stopLoss);
+  if (!Number.isFinite(entry) || !Number.isFinite(targetPrice) || !Number.isFinite(stop)) return false;
+  if (trend === 'BUY') return targetPrice > entry && stop < entry;
+  if (trend === 'SELL') return targetPrice < entry && stop > entry;
+  return false;
+}
+
+function applyAiRiskPlanToSignalData(signalData, trend, aiRiskPlan) {
+  if (!signalData || !aiRiskPlan || aiRiskPlan.applied !== true) return false;
+
+  const entryPrice = Number(signalData.entryPrice);
+  const aiTarget = Number(aiRiskPlan.targetPrice);
+  const aiStop = Number(aiRiskPlan.stopLossPrice);
+  if (!isDirectionalRrValid(trend, entryPrice, aiTarget, aiStop)) return false;
+
+  const rrMetrics = computeRrFromPrices(entryPrice, aiTarget, aiStop);
+  if (!rrMetrics) return false;
+
+  const existingRr = signalData.executionIntelligence?.rrAnalysis || signalData.rrAnalysis || {};
+  const minRequiredByRegime = Number.isFinite(Number(existingRr.minRequiredByRegime))
+    ? Number(existingRr.minRequiredByRegime)
+    : Number.isFinite(Number(aiRiskPlan.minRequiredRr))
+      ? Number(aiRiskPlan.minRequiredRr)
+      : 1.2;
+
+  if (rrMetrics.ratio < minRequiredByRegime) return false;
+
+  signalData.target = aiTarget;
+  signalData.stopLoss = aiStop;
+  signalData.rrAnalysis = {
+    ...existingRr,
+    ratio: Number(rrMetrics.ratio.toFixed(3)),
+    risk: Number(rrMetrics.risk.toFixed(8)),
+    reward: Number(rrMetrics.reward.toFixed(8)),
+    minRequiredByRegime,
+    status: rrMetrics.ratio >= minRequiredByRegime ? 'HEALTHY' : 'WEAK',
+    reason: `ai_${aiRiskPlan.source || 'consensus'}_optimized`
+  };
+  signalData.riskModel = {
+    ...(signalData.riskModel || {}),
+    realizedRR: signalData.rrAnalysis.ratio
+  };
+  signalData.targetLogicReason = [
+    signalData.targetLogicReason,
+    `ai_${aiRiskPlan.source || 'consensus'}_optimized`
+  ].filter(Boolean).join(' | ');
+  signalData.aiRiskPlan = {
+    applied: true,
+    source: aiRiskPlan.source || 'consensus',
+    rr: signalData.rrAnalysis.ratio,
+    minRequiredRr: minRequiredByRegime
+  };
+
+  const rrQualityScore = (() => {
+    const rr = rrMetrics.ratio;
+    if (!Number.isFinite(rr) || rr <= 0) return 0;
+    if (rr < 1) return 20;
+    if (rr < minRequiredByRegime) return 42;
+    const targetRr = Number.isFinite(Number(existingRr.targetByRegime))
+      ? Number(existingRr.targetByRegime)
+      : Math.max(minRequiredByRegime, 1.45);
+    if (rr >= targetRr * 1.15) return 96;
+    const denominator = Math.max(0.01, targetRr - minRequiredByRegime);
+    const normalized = (rr - minRequiredByRegime) / denominator;
+    return Math.max(0, Math.min(100, Math.round(55 + normalized * 35)));
+  })();
+
+  const existingExecution = signalData.executionIntelligence || {};
+  const previousContradictions = Array.isArray(existingExecution.contradictions)
+    ? existingExecution.contradictions
+    : [];
+  const nextContradictions = previousContradictions.filter((flag) => (
+    flag !== 'RR_BELOW_MIN_1_2' && flag !== 'RISK_EXCEEDS_REWARD'
+  ));
+  if (rrMetrics.ratio < 1.2) nextContradictions.push('RR_BELOW_MIN_1_2');
+  if (rrMetrics.reward <= rrMetrics.risk) nextContradictions.push('RISK_EXCEEDS_REWARD');
+
+  const contradictionSet = [...new Set(nextContradictions)];
+  const hardRejectFlags = new Set([
+    'RR_BELOW_MIN_1_2',
+    'RISK_EXCEEDS_REWARD',
+    'UNREALISTIC_TARGET_DISTANCE',
+    'STOP_TOO_TIGHT'
+  ]);
+  const hardReject = contradictionSet.some((flag) => hardRejectFlags.has(flag));
+
+  signalData.executionIntelligence = {
+    ...existingExecution,
+    target: aiTarget,
+    stopLoss: aiStop,
+    rrAnalysis: {
+      ...(existingExecution.rrAnalysis || {}),
+      ...signalData.rrAnalysis
+    },
+    scores: {
+      ...(existingExecution.scores || {}),
+      rrQuality: rrQualityScore
+    },
+    contradictions: contradictionSet,
+    contradictionCount: contradictionSet.length,
+    hardReject,
+    aiRiskPlan: signalData.aiRiskPlan
+  };
+
+  return true;
+}
+
 function incrementGateCounter(gateCounters, gate) {
   if (!gateCounters || !gate) return;
   if (!Number.isFinite(gateCounters[gate])) {
@@ -84,19 +239,57 @@ function incrementGateCounter(gateCounters, gate) {
   gateCounters[gate] += 1;
 }
 
+function resolvePendingSignalValidUntil(signal) {
+  if (!signal) return null;
+  if (signal.validUntil) {
+    const validTs = new Date(signal.validUntil).getTime();
+    if (Number.isFinite(validTs)) return new Date(validTs);
+  }
+  if (!signal.createdAt) return null;
+  const createdTs = new Date(signal.createdAt).getTime();
+  if (!Number.isFinite(createdTs)) return null;
+  return new Date(createdTs + SIGNAL_VALIDITY_MS);
+}
+
+async function closeExpiredPendingSignals(coin) {
+  const unresolvedSignals = await Signal.find({
+    coin,
+    status: { $in: ['ACTIVE', 'TAKEN'] },
+    result: 'PENDING'
+  });
+
+  if (!Array.isArray(unresolvedSignals) || unresolvedSignals.length === 0) {
+    return { hasUnresolved: false };
+  }
+
+  const nowMs = Date.now();
+  for (const unresolvedSignal of unresolvedSignals) {
+    const validUntil = resolvePendingSignalValidUntil(unresolvedSignal);
+    const validUntilMs = validUntil ? validUntil.getTime() : NaN;
+    if (!Number.isFinite(validUntilMs) || validUntilMs > nowMs) continue;
+
+    await Signal.findByIdAndUpdate(unresolvedSignal._id, {
+      status: 'CLOSED',
+      result: 'EXPIRED',
+      wasTaken: unresolvedSignal.status === 'TAKEN',
+      closedAt: new Date()
+    });
+    console.log(`[ENGINE] ${coin} stale unresolved signal auto-closed -> EXPIRED`);
+  }
+
+  const stillUnresolved = await Signal.findOne({
+    coin,
+    status: { $in: ['ACTIVE', 'TAKEN'] },
+    result: 'PENDING'
+  });
+
+  return { hasUnresolved: Boolean(stillUnresolved) };
+}
+
 async function canRunForCoin(coin) {
-  const activeSignal = await Signal.findOne({ coin, status: 'ACTIVE' });
-  if (activeSignal) {
-    if (activeSignal.validUntil && new Date(activeSignal.validUntil).getTime() <= Date.now()) {
-      await Signal.findByIdAndUpdate(activeSignal._id, {
-        status: 'CLOSED',
-        result: 'EXPIRED',
-        closedAt: new Date()
-      });
-      console.log(`[ENGINE] ${coin} stale ACTIVE signal auto-closed -> EXPIRED`);
-      return { allowed: true };
-    }
-    console.log(`[ENGINE] ${coin} skipped -> Active signal exists`);
+  const pendingLifecycle = await closeExpiredPendingSignals(coin);
+  if (pendingLifecycle.hasUnresolved) {
+    console.log(`[ENGINE] Duplicate signal blocked: active unresolved signal exists for ${coin}`);
     return { allowed: false, gate: 'cooldown' };
   }
 
@@ -197,18 +390,18 @@ function resolveBtcPenalty(coin, btcTrend, trend) {
       console.log(`[Engine] ${coin} BUY signal BLOCKED by BTC Strong Bearish trend`);
       return { blocked: true, penalty: 0 };
     }
-    console.log(`[Engine] ${coin} BUY signal penalized (-12) by BTC Strong Bearish trend`);
-    return { blocked: false, penalty: -12 };
+    console.log(`[Engine] ${coin} BUY signal penalized (-8) by BTC Strong Bearish trend`);
+    return { blocked: false, penalty: -8 };
   }
 
   if (btcTrend.includes('BULLISH') && trend === 'SELL') {
-    console.log(`[Engine] ${coin} SELL signal penalized (-20) by BTC Bullish trend`);
-    return { blocked: false, penalty: -20 };
+    console.log(`[Engine] ${coin} SELL signal penalized (-12) by BTC Bullish trend`);
+    return { blocked: false, penalty: -12 };
   }
 
   if (btcTrend === 'BEARISH' && trend === 'BUY') {
-    console.log(`[Engine] ${coin} BUY signal penalized (-15) by BTC Bearish trend`);
-    return { blocked: false, penalty: -15 };
+    console.log(`[Engine] ${coin} BUY signal penalized (-10) by BTC Bearish trend`);
+    return { blocked: false, penalty: -10 };
   }
 
   return { blocked: false, penalty: 0 };
@@ -345,6 +538,9 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
     return null;
   }
   const futuresData = await getFuturesContext(coin).catch(() => null);
+  const realtimeContext = SIGNAL_USE_REALTIME_CONTEXT
+    ? getRealtimeSignalContext(coin)
+    : null;
 
   const allCloses = klines.map((k) => k.close);
   const trendCloses = allCloses.slice(-TREND_CANDLES);
@@ -388,6 +584,19 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
     const prevBbData = calculateBollingerBands(allCloses.slice(0, -1), 20);
     if (prevBbData) bbExpanding = bbData.bandwidth > prevBbData.bandwidth;
   }
+  const atr = calculateATR(klines, 14);
+  const atrPct = currentPrice > 0 ? (atr / currentPrice) * 100 : 0;
+
+  const adxData = calculateADX(klines, 14);
+  const adxContext = evaluateAdxForSignal(trend, adxData, trigger);
+  const structureAnalysis = analyzeMarketStructure(klines);
+  const structureContext = evaluateStructureForSignal(trend, structureAnalysis);
+  const srContext = analyzeSupportResistance(klines, advancedSignal, volumeData);
+  const cvdContext = evaluateCvdForSignal(trend, realtimeContext, shortTermMomentum);
+  const depthContext = {
+    adjustment: Number(orderBookLiquidity?.adjustment || 0),
+    flags: Array.isArray(orderBookLiquidity?.flags) ? orderBookLiquidity.flags : []
+  };
 
   const higherTimeframeTrend = await detect4HTrend(coin);
   const higherTrend = higherTimeframeTrend ? higherTimeframeTrend.legacyTrend : null;
@@ -404,6 +613,23 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
     shortTermMomentum,
     midTermMomentum,
     currentPrice
+  });
+  const regimeContext = detectMarketRegimeAdvanced({
+    adxData,
+    bbWidthPercent,
+    atrPct,
+    slope: advancedSignal?.slope || 0,
+    structureData: structureAnalysis,
+    breakoutSignal: advancedSignal?.trigger === 'VOLATILITY_BREAKOUT',
+    bbExpanding
+  });
+  const liquidationContext = detectLiquidationPressure({
+    trend,
+    klines,
+    atr,
+    volumeData,
+    futuresData,
+    realtimeContext
   });
 
   const marketScore = await calcMarketScore(coin, trend, topCoins).catch(() => 15);
@@ -452,6 +678,16 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   const sentimentConfidenceAdjustment = calculateSentimentAdjustment(sentimentDirectionalScore);
   confidence = clampConfidence(confidence + sentimentConfidenceAdjustment);
 
+  const futuresAdjustment = SIGNAL_USE_FUTURES_CONTEXT
+    ? applyFuturesAdjustment(trend, futuresData)
+    : { adjustment: 0, notes: [], score: 0 };
+  confidence = clampConfidence(confidence + futuresAdjustment.adjustment);
+
+  const realtimeAdjustment = SIGNAL_USE_REALTIME_CONTEXT
+    ? applyRealtimeAdjustment(trend, realtimeContext)
+    : { adjustment: 0, notes: [], score: 0 };
+  confidence = clampConfidence(confidence + realtimeAdjustment.adjustment);
+
   const guardrailDecision = applyGuardrailPenalties({
     trend,
     btcTrend,
@@ -461,6 +697,15 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
     macroTrends
   });
   confidence = clampConfidence(confidence + guardrailDecision.penalty);
+
+  const preGateMicroAdjustment = srContext.signalImpact.adjustment
+    + adxContext.adjustment
+    + structureContext.adjustment
+    + regimeContext.adjustment
+    + cvdContext.adjustment
+    + liquidationContext.adjustment
+    + depthContext.adjustment;
+  confidence = clampConfidence(confidence + preGateMicroAdjustment);
 
   const initialGate = passQualityGate(coin, confidence, volumeData, momentum);
   if (!initialGate.passed) {
@@ -491,13 +736,81 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
 
   const segmentKey = buildSegmentKey({
     trigger,
-    regime,
+    regime: regimeContext.regime || regime,
     symbol: coin,
     confidence
   });
   const learningPerformance = await analyzePerformance();
   const segmentAdjustment = getSegmentAdaptiveAdjustment(learningPerformance, segmentKey);
   confidence = clampConfidence(confidence + segmentAdjustment.adjustment);
+
+  const scaleAdjustment = (value) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return 0;
+    return parsed * 0.35;
+  };
+  const confidenceCalibration = calibrateConfidence(confidence, {
+    supportResistance: {
+      adjustment: scaleAdjustment(srContext.signalImpact.adjustment),
+      flags: srContext.signalImpact.flags || []
+    },
+    adx: {
+      adjustment: scaleAdjustment(adxContext.adjustment),
+      flags: adxContext.flags || []
+    },
+    structure: {
+      adjustment: scaleAdjustment(structureContext.adjustment),
+      flags: structureContext.flags || []
+    },
+    regime: {
+      adjustment: scaleAdjustment(regimeContext.adjustment),
+      flags: regimeContext.flags || []
+    },
+    cvd: {
+      adjustment: scaleAdjustment(cvdContext.adjustment),
+      flags: cvdContext.flags || []
+    },
+    liquidation: {
+      adjustment: scaleAdjustment(liquidationContext.adjustment),
+      flags: liquidationContext.flags || []
+    },
+    depth: {
+      adjustment: scaleAdjustment(depthContext.adjustment),
+      flags: depthContext.flags || []
+    },
+    realtime: {
+      adjustment: scaleAdjustment(realtimeAdjustment.adjustment)
+    },
+    futures: {
+      adjustment: scaleAdjustment(futuresAdjustment.adjustment)
+    },
+    sentimentAdjustment: scaleAdjustment(sentimentConfidenceAdjustment),
+    marketGuardrail: {
+      adjustment: scaleAdjustment(guardrailDecision.penalty + postExecutionGuardrail.penalty + fourH.fourHPenalty + execution.executionAdjustment)
+    },
+    segment: {
+      adjustment: scaleAdjustment(segmentAdjustment.adjustment)
+    }
+  }, trend);
+  confidence = clampConfidence(confidenceCalibration.finalConfidence);
+
+  const qualityValidator = validateFinalSignalQuality({
+    trend,
+    confidence,
+    regimeContext,
+    adxContext,
+    structureContext,
+    srContext: srContext.signalImpact,
+    cvdContext,
+    depthContext,
+    liquidationContext
+  });
+  confidence = clampConfidence(confidence + qualityValidator.penalty);
+  if (qualityValidator.reject) {
+    console.log(`[ENGINE] ${coin} rejected -> final quality validator: ${qualityValidator.reasons.join(', ')}`);
+    incrementGateCounter(gateCounters, 'quality_fail');
+    return null;
+  }
 
   const finalGate = passQualityGate(coin, confidence, volumeData, momentum, 'Final ');
   if (!finalGate.passed) {
@@ -506,8 +819,47 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   }
   const signalQuality = finalGate.signalQuality;
 
-  const atr = calculateATR(klines, 14);
-  const signalData = buildSignalData(coin, trend, currentPrice, atr);
+  const signalData = buildRiskManagedSignalData(coin, trend, currentPrice, atr, {
+    confidence,
+    regimeContext,
+    supportResistance: srContext,
+    liquidationContext,
+    legacyRegime: regime
+  });
+  const executionIntelligence = evaluateExecutionIntelligence({
+    signalData,
+    trend,
+    currentPrice,
+    atr,
+    regimeContext,
+    supportResistance: srContext,
+    marketStructure: structureAnalysis,
+    structureContext,
+    orderBookLiquidity,
+    liquidationContext,
+    depthContext,
+    volumeData,
+    momentum,
+    adxContext,
+    executionQualityData: execution.executionQualityData
+  });
+
+  signalData.entryPrice = executionIntelligence.entryPrice;
+  signalData.target = executionIntelligence.target;
+  signalData.stopLoss = executionIntelligence.stopLoss;
+  signalData.executionIntelligence = executionIntelligence;
+  signalData.rrAnalysis = executionIntelligence.rrAnalysis;
+  signalData.executionRealismScore = executionIntelligence?.scores?.executionRealism ?? null;
+  signalData.survivabilityScore = executionIntelligence?.scores?.survivability ?? null;
+  signalData.structureStopReason = executionIntelligence?.stop?.reason || null;
+  signalData.targetLogicReason = executionIntelligence?.targetModel?.reason || null;
+  signalData.tradeQualityGrade = executionIntelligence?.baseTradeQualityGrade || null;
+  signalData.riskGrade = executionIntelligence?.riskGrade || null;
+  signalData.riskModel = {
+    ...(signalData.riskModel || {}),
+    realizedRR: executionIntelligence?.rrAnalysis?.ratio ?? signalData?.riskModel?.realizedRR ?? null,
+    executionDecisionHint: executionIntelligence?.decisionHint || null
+  };
   signalData.validUntil = new Date(Date.now() + SIGNAL_VALIDITY_MS);
   signalData.confidence = confidence;
   signalData.sentimentScore = sentimentScore;
@@ -526,25 +878,108 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   signalData.guardrailFlags = [...new Set([
     ...guardrailDecision.flags,
     ...postExecutionGuardrail.flags,
+    ...(srContext.signalImpact.flags || []),
+    ...(adxContext.flags || []),
+    ...(structureContext.flags || []),
+    ...(regimeContext.flags || []),
+    ...(cvdContext.flags || []),
+    ...(depthContext.flags || []),
+    ...(liquidationContext.flags || []),
+    ...(qualityValidator.reasons || []),
     ...(segmentAdjustment.applied ? [`SEGMENT:${segmentAdjustment.reason}`] : [])
   ])];
   signalData.signalQuality = signalQuality;
   signalData.macroTrends = macroTrends;
   signalData.orderBookLiquidity = orderBookLiquidity;
+  signalData.supportResistance = srContext;
+  signalData.marketStructure = structureAnalysis;
+  signalData.marketStructureSignal = structureContext;
+  signalData.adxContext = adxContext;
+  signalData.regimeContext = regimeContext;
+  signalData.cvdContext = cvdContext.metrics || null;
+  signalData.liquidationContext = liquidationContext;
+  signalData.depthContext = {
+    adjustment: depthContext.adjustment,
+    flags: depthContext.flags,
+    persistence: orderBookLiquidity?.depthPersistence || null
+  };
+  signalData.confidenceCalibration = confidenceCalibration;
+  signalData.futuresContext = futuresData ? {
+    fundingRate: toNullableNumber(futuresData.fundingRate, 8),
+    longShortRatio: toNullableNumber(futuresData.longShortRatio, 4),
+    takerBuySellRatio: toNullableNumber(futuresData.takerBuySellRatio, 4),
+    openInterest: toNullableNumber(futuresData.openInterest, 4),
+    fundingRateAvg: toNullableNumber(futuresData.fundingRateAvg, 8),
+    fundingRateTrendPct: toNullableNumber(futuresData.fundingRateTrendPct, 4),
+    openInterestTrendPct: toNullableNumber(futuresData.openInterestTrendPct, 4),
+    topTraderPositionRatio: toNullableNumber(futuresData.topTraderPositionRatio, 4),
+    topTraderAccountRatio: toNullableNumber(futuresData.topTraderAccountRatio, 4),
+    crowdingBias: toNullableNumber(futuresData.crowdingBias, 4)
+  } : null;
+  signalData.realtimeContext = realtimeContext || null;
+  signalData.indicators = {
+    rsi: toNullableNumber(rsi, 4),
+    prevRsi: toNullableNumber(prevRsi, 4),
+    ema9: toNullableNumber(advancedSignal?.ema9, 8),
+    ema21: toNullableNumber(advancedSignal?.ema21, 8),
+    emaSlope: toNullableNumber(advancedSignal?.slope, 6),
+    emaProximity: advancedSignal?.proximity || null,
+    emaZone: advancedSignal?.zone || null,
+    macd: {
+      macdLine: toNullableNumber(macdData?.macdLine, 8),
+      signalLine: toNullableNumber(macdData?.signalLine, 8),
+      histogram: toNullableNumber(macdData?.histogram, 8)
+    },
+    atr: toNullableNumber(atr, 8),
+    atrPct: toNullableNumber(atrPct, 6),
+    bbUpper: toNullableNumber(bbData?.upper, 8),
+    bbLower: toNullableNumber(bbData?.lower, 8),
+    bbMiddle: toNullableNumber(bbData?.middle, 8),
+    bbWidthPercent: toNullableNumber(bbWidthPercent, 6),
+    bbExpanding,
+    volume: toNullableNumber(volumeData?.current, 2),
+    volumeAvg: toNullableNumber(volumeData?.average, 2),
+    volumeRatio: toNullableNumber(volumeData?.ratio, 6),
+    volumeSpike: Boolean(volumeData?.isSpike),
+    volumeDeltaRatio: toNullableNumber(volumeDelta?.deltaRatio, 6)
+  };
   signalData.confidenceBreakdown = {
     technical: Math.round(technicalScore * 0.7),
     market: normalizedMarketScore,
     sentiment: sentimentScore,
-    bonus: confidenceBoost + (sentimentConfidenceAdjustment > 0 ? sentimentConfidenceAdjustment : 0) + (segmentAdjustment.adjustment > 0 ? segmentAdjustment.adjustment : 0),
+    bonus: confidenceBoost
+      + (srContext.signalImpact.adjustment > 0 ? srContext.signalImpact.adjustment : 0)
+      + (adxContext.adjustment > 0 ? adxContext.adjustment : 0)
+      + (structureContext.adjustment > 0 ? structureContext.adjustment : 0)
+      + (regimeContext.adjustment > 0 ? regimeContext.adjustment : 0)
+      + (cvdContext.adjustment > 0 ? cvdContext.adjustment : 0)
+      + (liquidationContext.adjustment > 0 ? liquidationContext.adjustment : 0)
+      + (depthContext.adjustment > 0 ? depthContext.adjustment : 0)
+      + (sentimentConfidenceAdjustment > 0 ? sentimentConfidenceAdjustment : 0)
+      + (segmentAdjustment.adjustment > 0 ? segmentAdjustment.adjustment : 0)
+      + (futuresAdjustment.adjustment > 0 ? futuresAdjustment.adjustment : 0)
+      + (realtimeAdjustment.adjustment > 0 ? realtimeAdjustment.adjustment : 0)
+      + (confidenceCalibration.breakdown?.contradictionPenalty > 0 ? confidenceCalibration.breakdown.contradictionPenalty : 0),
     penalty: confidencePenalty
       + weakPenalty
       + volumeDeltaPenalty
       + btcConfidencePenalty
+      + (srContext.signalImpact.adjustment < 0 ? srContext.signalImpact.adjustment : 0)
+      + (adxContext.adjustment < 0 ? adxContext.adjustment : 0)
+      + (structureContext.adjustment < 0 ? structureContext.adjustment : 0)
+      + (regimeContext.adjustment < 0 ? regimeContext.adjustment : 0)
+      + (cvdContext.adjustment < 0 ? cvdContext.adjustment : 0)
+      + (liquidationContext.adjustment < 0 ? liquidationContext.adjustment : 0)
+      + (depthContext.adjustment < 0 ? depthContext.adjustment : 0)
       + fourH.fourHPenalty
       + execution.executionAdjustment
       + (sentimentConfidenceAdjustment < 0 ? sentimentConfidenceAdjustment : 0)
+      + (futuresAdjustment.adjustment < 0 ? futuresAdjustment.adjustment : 0)
+      + (realtimeAdjustment.adjustment < 0 ? realtimeAdjustment.adjustment : 0)
       + guardrailDecision.penalty
       + postExecutionGuardrail.penalty
+      + qualityValidator.penalty
+      + (confidenceCalibration.breakdown?.contradictionPenalty < 0 ? confidenceCalibration.breakdown.contradictionPenalty : 0)
       + (segmentAdjustment.adjustment < 0 ? segmentAdjustment.adjustment : 0)
   };
 
@@ -556,11 +991,14 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   reasons.sentiment = sentimentScore > 0.3 ? 'BULLISH' : sentimentScore < -0.3 ? 'BEARISH' : 'NEUTRAL';
   reasons.execution = execution.executionQualityData?.executionQuality || 'UNKNOWN';
   reasons.slippageRisk = execution.executionQualityData?.slippageRisk || 'UNKNOWN';
-  reasons.segment = segmentAdjustment.reason || 'neutral_segment';
+  const futuresNote = futuresAdjustment.notes.length > 0 ? futuresAdjustment.notes.join(', ') : 'neutral_futures';
+  const realtimeNote = realtimeAdjustment.notes.length > 0 ? realtimeAdjustment.notes.join(', ') : 'neutral_realtime';
+  reasons.segment = `${segmentAdjustment.reason || 'neutral_segment'} | F:${futuresNote} | R:${realtimeNote} | ADX:${adxContext.strength} | REG:${regimeContext.regime} | STR:${structureAnalysis.trendBias}`;
   if (orderBookLiquidity) reasons.execution = `${reasons.execution} | OB_R:${orderBookLiquidity.bidAskVolumeRatio.toFixed(2)}`;
+  if (cvdContext?.metrics) reasons.execution = `${reasons.execution} | CVD:${cvdContext.metrics.cvd15m}`;
   signalData.reason = reasons;
   signalData.trigger = trigger;
-  signalData.regime = regime;
+  signalData.regime = regimeContext.regime || regime;
   signalData.higherTimeframeTrend = higherTimeframeTrend ? higherTimeframeTrend.trend : null;
 
   const signalToAdjust = {
@@ -575,7 +1013,16 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
     trendStrength: signalQuality,
     isLateEntry: false,
     macroTrends,
-    orderBookLiquidity
+    orderBookLiquidity,
+    realtimeContext,
+    supportResistance: srContext,
+    marketStructure: structureAnalysis,
+    adxContext,
+    regimeContext,
+    cvdContext: cvdContext.metrics || null,
+    liquidationContext,
+    confidenceCalibration,
+    executionIntelligence
   };
 
   const adjustedSignal = await enhancedAnalyze(signalToAdjust);
@@ -583,13 +1030,15 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   const finalAdjusted = applyAiDecisionModes(adjustedSignal);
   if (!finalAdjusted) return null;
 
-  // `aiScore` remains internal rule+history heuristic, `aiConfidence` stores Grok probability score.
+  // `aiScore` remains internal rule+history heuristic; `aiConfidence` is TriCore final confidence.
   signalData.aiScore = finalAdjusted.aiScore;
   signalData.aiConfidence = finalAdjusted.aiConfidence ?? finalAdjusted.aiScore ?? null;
   signalData.aiDecision = finalAdjusted.aiDecision;
   signalData.aiMessage = finalAdjusted.aiMessage;
+  signalData.groqTradeCall = finalAdjusted.groqTradeCall ?? null;
   signalData.groqInsight = finalAdjusted.groqInsight ?? '';
   signalData.nvidiaConfidence = finalAdjusted.nvidiaConfidence ?? null;
+  signalData.nvidiaTradeCall = finalAdjusted.nvidiaTradeCall ?? null;
   signalData.nvidiaInsight = finalAdjusted.nvidiaInsight ?? '';
   signalData.nvidiaStatus = finalAdjusted.nvidiaStatus || 'SKIPPED';
   signalData.nvidiaAttempts = Number.isFinite(Number(finalAdjusted.nvidiaAttempts)) ? Number(finalAdjusted.nvidiaAttempts) : 0;
@@ -597,6 +1046,56 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   signalData.aiStatus = finalAdjusted.aiStatus || 'SKIPPED';
   signalData.aiAttempts = Number.isFinite(Number(finalAdjusted.aiAttempts)) ? Number(finalAdjusted.aiAttempts) : 0;
   signalData.aiError = finalAdjusted.aiError || null;
+  signalData.machineContext = finalAdjusted.machineContext || null;
+  signalData.grokValidation = finalAdjusted.grokValidation || null;
+  signalData.nvidiaValidation = finalAdjusted.nvidiaValidation || null;
+  signalData.triCore = finalAdjusted.triCore || null;
+  signalData.finalTradeDecision = finalAdjusted.finalTradeDecision || null;
+  signalData.aiAgreementScore = Number.isFinite(Number(finalAdjusted.aiAgreementScore))
+    ? Number(finalAdjusted.aiAgreementScore)
+    : null;
+  signalData.contradictionList = Array.isArray(finalAdjusted.contradictionList)
+    ? finalAdjusted.contradictionList
+    : [];
+  signalData.validatorReasons = Array.isArray(finalAdjusted.validatorReasons)
+    ? finalAdjusted.validatorReasons
+    : [];
+  signalData.finalConfidenceBreakdown = finalAdjusted.finalConfidenceBreakdown || null;
+  applyAiRiskPlanToSignalData(signalData, trend, finalAdjusted.aiRiskPlan);
+
+  const executionDecision = finalizeExecutionDecision({
+    executionIntelligence: signalData.executionIntelligence,
+    triCore: signalData.triCore,
+    finalConfidence: signalData.aiConfidence
+  });
+  signalData.finalTradeDecision = executionDecision.finalDecision;
+  signalData.tradeQualityGrade = executionDecision.tradeQualityGrade;
+  signalData.tradeDecisionReason = executionDecision.tradeDecisionReason;
+  signalData.agreementStrength = executionDecision.agreementStrength;
+  signalData.executionRealismScore = executionDecision.executionRealismScore;
+  signalData.survivabilityScore = executionDecision.survivabilityScore;
+  signalData.contradictionSeverity = executionDecision.contradictionSeverity;
+  if (signalData.triCore && typeof signalData.triCore === 'object') {
+    signalData.triCore = {
+      ...signalData.triCore,
+      triCoreDecision: signalData.triCore.finalTradeDecision,
+      finalTradeDecision: executionDecision.finalDecision
+    };
+  }
+  signalData.executionIntelligence = {
+    ...(signalData.executionIntelligence || {}),
+    finalDecision: executionDecision.finalDecision,
+    tradeQualityGrade: executionDecision.tradeQualityGrade,
+    agreementStrength: executionDecision.agreementStrength,
+    contradictionSeverity: executionDecision.contradictionSeverity,
+    tradeDecisionReason: executionDecision.tradeDecisionReason
+  };
+
+  const duplicateBeforeSave = await closeExpiredPendingSignals(coin);
+  if (duplicateBeforeSave.hasUnresolved) {
+    console.log(`[ENGINE] Duplicate signal blocked: active unresolved signal exists for ${coin}`);
+    return null;
+  }
 
   const savedSignal = new Signal(signalData);
   await savedSignal.save();

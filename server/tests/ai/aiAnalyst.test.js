@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
   enhancedAnalyze,
   parseAiEnrichmentPayload,
+  parseAiValidatorPayload,
   buildEnrichmentPrompt,
   buildPerformanceContext
 } = require('../../services/aiAnalyst');
@@ -13,74 +14,166 @@ function sampleSignal(overrides = {}) {
     coin: 'BTCUSDT',
     type: 'BUY',
     entryPrice: 100,
-    target: 110,
+    target: 108,
     stopLoss: 95,
-    confidence: 62,
-    signalQuality: 'WEAK',
-    trendStrength: 'WEAK',
+    confidence: 74,
+    signalQuality: 'GOOD',
+    trendStrength: 'STRONG',
     trigger: 'EMA_ZONE',
-    regime: 'RANGING',
-    higherTimeframeTrend: 'bearish',
-    rsi: 78,
-    prevRsi: 75,
-    sentimentScore: -0.2,
-    volumeSpike: false,
-    btcTrend: 'STRONG_BEARISH',
+    regime: 'TRENDING',
+    higherTimeframeTrend: 'bullish',
+    rsi: 46,
+    prevRsi: 44,
+    sentimentScore: 0.2,
+    volumeSpike: true,
+    btcTrend: 'BULLISH',
     isLateEntry: false,
-    newsSummary: 'Sentiment:-0.200 (BEARISH)',
+    newsSummary: 'Sentiment:0.200 (BULLISH)',
     reason: {
-      trend: 'DOWNTREND',
-      momentum: 'WEAK',
-      volume: 'LOW',
-      rsi: 'OVERBOUGHT',
-      macd: 'BEARISH',
-      sentiment: 'BEARISH',
-      execution: 'RISKY',
-      slippageRisk: 'HIGH',
-      volumeConfirmed: 'SELL_DOMINANT',
-      deltaRatio: '0.55'
+      trend: 'UPTREND',
+      momentum: 'STRONG',
+      volume: 'HIGH',
+      rsi: 'BULLISH',
+      macd: 'BULLISH',
+      sentiment: 'BULLISH',
+      execution: 'GOOD',
+      slippageRisk: 'LOW',
+      volumeConfirmed: 'BUY_DOMINANT',
+      deltaRatio: '0.71'
     },
     confidenceBreakdown: {
-      technical: 31,
-      market: 14,
-      sentiment: -0.2,
-      bonus: 0,
+      technical: 48,
+      market: 22,
+      sentiment: 0.2,
+      bonus: 12,
       penalty: -8
     },
-    macroTrends: {
-      dxy: { trend: 'BULLISH', direction: 'UP', strength: 'STRONG', changePct: 0.42 },
-      sp500: { trend: 'BEARISH', direction: 'DOWN', strength: 'MODERATE', changePct: -0.31 }
+    indicators: {
+      rsi: 46,
+      prevRsi: 44,
+      ema9: 101.2,
+      ema21: 99.8,
+      emaSlope: 0.18,
+      emaProximity: 'INSIDE_ZONE',
+      emaZone: 'BULL',
+      macd: { macdLine: 0.42, signalLine: 0.28, histogram: 0.14 },
+      atr: 1.2,
+      atrPct: 1.1,
+      bbUpper: 106,
+      bbLower: 94,
+      bbMiddle: 100,
+      bbWidthPercent: 2.3,
+      bbExpanding: true,
+      volume: 120000,
+      volumeAvg: 82000,
+      volumeRatio: 1.46
+    },
+    supportResistance: {
+      signalImpact: {
+        nearestSupport: { price: 98, strength: 68 },
+        nearestResistance: { price: 110, strength: 72 },
+        flags: [],
+        adjustment: 3
+      }
+    },
+    marketStructure: {
+      trendBias: 'BULLISH',
+      reversalRisk: 'LOW',
+      structureBreak: { bullishBreak: true, bearishBreak: false },
+      summary: { highSequence: 'HH', lowSequence: 'HL' }
+    },
+    marketStructureSignal: {
+      adjustment: 6,
+      flags: ['STRUCTURE_ALIGNED']
+    },
+    adxContext: {
+      adx: 27,
+      strength: 'MODERATE',
+      directionalAligned: true,
+      flags: []
+    },
+    regimeContext: {
+      regime: 'TRENDING',
+      regimeScore: 78,
+      policy: { confidenceFloor: 54 }
+    },
+    cvdContext: {
+      cvd1m: 12345,
+      cvd5m: 33550,
+      cvd15m: 58210,
+      divergence: 'NONE'
+    },
+    liquidationContext: {
+      possibleShortSqueeze: false,
+      possibleLongSqueeze: false,
+      liquidationCascade: false,
+      exhaustionMove: false
+    },
+    depthContext: {
+      adjustment: 2,
+      flags: []
     },
     orderBookLiquidity: {
-      bidAskVolumeRatio: 0.61,
-      massiveAskWallDetected: true,
-      blockedByLiquidity: true
+      bidAskVolumeRatio: 1.22,
+      depthPersistence: {
+        samples: 5,
+        spoofRiskScore: 22,
+        bidWallPersistencePct: 64,
+        askWallPersistencePct: 20
+      }
     },
+    futuresData: {
+      fundingRate: 0.0001,
+      longShortRatio: 1.12,
+      takerBuySellRatio: 1.08,
+      openInterestTrendPct: 3.2
+    },
+    realtimeContext: {
+      tradeImbalance1m: 0.19,
+      buyQuote1m: 400000,
+      sellQuote1m: 260000
+    },
+    sentimentBreakdown: {
+      source: 'news_aggregator'
+    },
+    riskModel: {
+      realizedRR: 1.7
+    },
+    guardrailFlags: [],
     ...overrides
   };
 }
 
-test('parseAiEnrichmentPayload parses strict JSON payload', () => {
-  const payload = parseAiEnrichmentPayload('{"confidence_percent": 81, "risk_note": "Strong setup but watch resistance."}');
-  assert.equal(payload.confidence, 81);
-  assert.equal(payload.riskNote, 'Strong setup but watch resistance.');
+test('parseAiValidatorPayload parses strict validator JSON payload', () => {
+  const payload = parseAiValidatorPayload('{"ai_confidence": 81, "agreement_score": 77, "validator_decision":"AGREE", "trade_decision":"TAKE", "major_contradictions": [], "minor_risks":["near resistance"], "confidence_adjustment": 4, "target_price": 108.8, "stop_loss_price": 95.8, "summary":"Trend and flow aligned with acceptable risk."}');
+  assert.equal(payload.ai_confidence, 81);
+  assert.equal(payload.agreement_score, 77);
+  assert.equal(payload.validator_decision, 'AGREE');
+  assert.equal(payload.trade_decision, 'TAKE');
+  assert.equal(payload.target_price, 108.8);
+  assert.equal(payload.stop_loss_price, 95.8);
+  assert.deepEqual(payload.major_contradictions, []);
 });
 
-test('parseAiEnrichmentPayload returns null for invalid payload', () => {
-  const payload = parseAiEnrichmentPayload('not-json-payload');
-  assert.equal(payload, null);
+test('parseAiEnrichmentPayload alias parses validator payload', () => {
+  const payload = parseAiEnrichmentPayload('{"ai_confidence": 59, "agreement_score": 51, "validator_decision":"PARTIAL", "trade_decision":"WAIT", "major_contradictions":["weak adx"], "minor_risks":[], "confidence_adjustment":-5, "summary":"Weak trend quality."}');
+  assert.equal(payload.validator_decision, 'PARTIAL');
+  assert.equal(payload.trade_decision, 'WAIT');
+  assert.equal(payload.confidence_adjustment, -5);
 });
 
-test('buildEnrichmentPrompt includes full-context and performance blocks', () => {
+test('buildEnrichmentPrompt includes strict schema and machine context block', () => {
   const prompt = buildEnrichmentPrompt(
     sampleSignal(),
-    'Full Signal Context Block',
-    'Trigger(BUY) W/L:5/3 WinRate:62.5%'
+    { coin: 'BTCUSDT', machineConfidence: 74 },
+    'Trigger(EMA_ZONE) W/L:7/3 WinRate:70.0%'
   );
-  assert.match(prompt, /Recent Strategy Performance:/);
-  assert.match(prompt, /Full Signal Context:/);
-  assert.match(prompt, /confidence_percent/);
-  assert.match(prompt, /risk_note/);
+  assert.match(prompt, /strict crypto signal validation engine/i);
+  assert.match(prompt, /ai_confidence/);
+  assert.match(prompt, /validator_decision/);
+  assert.match(prompt, /target_price/);
+  assert.match(prompt, /stop_loss_price/);
+  assert.match(prompt, /Machine context JSON/);
 });
 
 test('buildPerformanceContext returns rate lines for trigger and symbol', () => {
@@ -93,14 +186,41 @@ test('buildPerformanceContext returns rate lines for trigger and symbol', () => 
   assert.match(context, /Coin\+Trigger\(BTCUSDT\)/);
 });
 
-test('enhancedAnalyze keeps signal advisory when Groq and NVIDIA payloads fail (fail-open)', async () => {
+test('enhancedAnalyze runs TriCore and returns TAKE on dual AI agreement', async () => {
   const signal = sampleSignal();
   const result = await enhancedAnalyze(signal, {
     analyzePerformance: async () => null,
     askGroqWithMeta: async () => ({
-      text: 'not_json',
-      attempts: 3,
-      error: 'timeout'
+      text: '{"ai_confidence": 84, "agreement_score": 80, "validator_decision":"AGREE", "trade_decision":"TAKE", "major_contradictions": [], "minor_risks": [], "confidence_adjustment": 4, "target_price":108.8, "stop_loss_price":95.8, "summary":"Clean trend and supportive flow."}',
+      attempts: 1,
+      error: null
+    }),
+    askNvidiaWithMeta: async () => ({
+      text: '{"ai_confidence": 82, "agreement_score": 78, "validator_decision":"AGREE", "trade_decision":"TAKE", "major_contradictions": [], "minor_risks": [], "confidence_adjustment": 3, "target_price":109.0, "stop_loss_price":95.9, "summary":"No material contradiction detected."}',
+      attempts: 1,
+      error: null
+    })
+  });
+
+  assert.equal(result.aiStatus, 'SUCCESS');
+  assert.equal(result.nvidiaStatus, 'SUCCESS');
+  assert.equal(result.finalTradeDecision, 'TAKE');
+  assert.equal(result.aiDecision, 'STRONG_APPROVE');
+  assert.equal(result.groqTradeCall, 'TAKE');
+  assert.equal(result.nvidiaTradeCall, 'TAKE');
+  assert.ok(result.aiConfidence >= 70);
+  assert.equal(result.aiRiskPlan?.applied, true);
+  assert.equal(result.machineContext.coin, 'BTCUSDT');
+});
+
+test('enhancedAnalyze keeps flow alive when one validator fails', async () => {
+  const signal = sampleSignal();
+  const result = await enhancedAnalyze(signal, {
+    analyzePerformance: async () => null,
+    askGroqWithMeta: async () => ({
+      text: '{"ai_confidence": 79, "agreement_score": 70, "validator_decision":"AGREE", "trade_decision":"WAIT", "major_contradictions": [], "minor_risks": ["liquidity thin"], "confidence_adjustment": 0, "summary":"Structure okay with execution caution."}',
+      attempts: 1,
+      error: null
     }),
     askNvidiaWithMeta: async () => ({
       text: 'not_json',
@@ -109,141 +229,32 @@ test('enhancedAnalyze keeps signal advisory when Groq and NVIDIA payloads fail (
     })
   });
 
-  assert.ok(result);
-  assert.equal(result.aiDecision, 'REJECT');
-  assert.equal(result.aiStatus, 'FALLBACK');
-  assert.equal(result.aiAttempts, 3);
-  assert.equal(result.aiConfidence, signal.confidence);
-  assert.equal(result.aiError, 'timeout');
+  assert.equal(result.aiStatus, 'SUCCESS');
   assert.equal(result.nvidiaStatus, 'FALLBACK');
-  assert.equal(result.nvidiaAttempts, 2);
-  assert.equal(result.nvidiaConfidence, null);
   assert.equal(result.nvidiaError, 'nvidia_timeout');
+  assert.ok(['WAIT', 'SKIP'].includes(result.finalTradeDecision));
+  assert.ok(result.aiConfidence <= 90);
 });
 
-test('enhancedAnalyze keeps Groq primary and stores NVIDIA enrichment when both succeed', async () => {
-  const signal = sampleSignal({ confidence: 74, trendStrength: 'STRONG', volumeSpike: true, rsi: 46 });
+test('enhancedAnalyze returns SKIP when both validators disagree', async () => {
+  const signal = sampleSignal({ confidence: 82 });
   const result = await enhancedAnalyze(signal, {
-    analyzePerformance: async () => ({
-      triggerStats: { EMA_ZONE: { win: 7, loss: 3 } },
-      triggerSymbolStats: { EMA_ZONE: { BTCUSDT: { win: 4, loss: 2 } } }
-    }),
+    analyzePerformance: async () => null,
     askGroqWithMeta: async () => ({
-      text: '{"confidence_percent": 83, "risk_note": "Momentum supports trend; risk is sudden macro reversal."}',
+      text: '{"ai_confidence": 32, "agreement_score": 20, "validator_decision":"DISAGREE", "trade_decision":"SKIP", "major_contradictions": ["fake breakout risk"], "minor_risks": ["weak liquidity"], "confidence_adjustment": -10, "summary":"High contradiction cluster versus machine bias."}',
       attempts: 1,
       error: null
     }),
     askNvidiaWithMeta: async () => ({
-      text: '{"confidence_percent": 79, "risk_note": "Liquidity stable; monitor macro headlines."}',
+      text: '{"ai_confidence": 28, "agreement_score": 16, "validator_decision":"DISAGREE", "trade_decision":"SKIP", "major_contradictions": ["regime mismatch"], "minor_risks": ["cvd divergence"], "confidence_adjustment": -12, "summary":"Trend quality unsupported across flow metrics."}',
       attempts: 1,
       error: null
     })
   });
 
-  assert.equal(result.aiStatus, 'SUCCESS');
-  assert.equal(result.aiAttempts, 1);
-  assert.equal(result.aiConfidence, 83);
-  assert.match(result.groqInsight, /Momentum supports trend/);
-  assert.equal(result.aiError, null);
-  assert.equal(result.nvidiaStatus, 'SUCCESS');
-  assert.equal(result.nvidiaAttempts, 1);
-  assert.equal(result.nvidiaConfidence, 79);
-  assert.match(result.nvidiaInsight, /Liquidity stable/);
-  assert.equal(result.nvidiaError, null);
-});
-
-test('enhancedAnalyze keeps Groq decision path stable when NVIDIA fails', async () => {
-  const signal = sampleSignal({ confidence: 71, trendStrength: 'STRONG', volumeSpike: true, rsi: 44 });
-  const result = await enhancedAnalyze(signal, {
-    analyzePerformance: async () => null,
-    askGroqWithMeta: async () => ({
-      text: '{"confidence_percent": 76, "risk_note": "Structure valid, but protect downside."}',
-      attempts: 1,
-      error: null
-    }),
-    askNvidiaWithMeta: async () => ({
-      text: 'not_json',
-      attempts: 2,
-      error: 'provider_error'
-    })
-  });
-
-  assert.equal(result.aiStatus, 'SUCCESS');
-  assert.equal(result.aiConfidence, 76);
-  assert.equal(result.aiError, null);
-  assert.equal(result.nvidiaStatus, 'FALLBACK');
-  assert.equal(result.nvidiaConfidence, null);
-  assert.equal(result.nvidiaAttempts, 2);
-  assert.equal(result.nvidiaError, 'provider_error');
-});
-
-test('enhancedAnalyze skips Grok when machine confidence is below trigger threshold', async () => {
-  const signal = sampleSignal({ confidence: 59 });
-  let groqCalled = false;
-  let nvidiaCalled = false;
-
-  const result = await enhancedAnalyze(signal, {
-    analyzePerformance: async () => null,
-    askGroqWithMeta: async () => {
-      groqCalled = true;
-      return {
-        text: '{"confidence_percent": 90, "risk_note": "should not run"}',
-        attempts: 1,
-        error: null
-      };
-    },
-    askNvidiaWithMeta: async () => {
-      nvidiaCalled = true;
-      return {
-        text: '{"confidence_percent": 88, "risk_note": "should not run"}',
-        attempts: 1,
-        error: null
-      };
-    }
-  });
-
-  assert.equal(groqCalled, false);
-  assert.equal(nvidiaCalled, false);
-  assert.equal(result.aiStatus, 'SKIPPED');
-  assert.equal(result.aiConfidence, 59);
-  assert.equal(result.aiAttempts, 0);
-  assert.equal(result.aiError, 'below_ai_trigger_confidence');
-  assert.equal(result.nvidiaStatus, 'SKIPPED');
-  assert.equal(result.nvidiaAttempts, 0);
-  assert.equal(result.nvidiaError, 'below_ai_trigger_confidence');
-});
-
-test('enhancedAnalyze allows Grok when machine confidence equals trigger threshold', async () => {
-  const signal = sampleSignal({ confidence: 60 });
-  let groqCalled = false;
-  let nvidiaCalled = false;
-
-  const result = await enhancedAnalyze(signal, {
-    analyzePerformance: async () => null,
-    askGroqWithMeta: async () => {
-      groqCalled = true;
-      return {
-        text: '{"confidence_percent": 67, "risk_note": "Threshold boundary call executed."}',
-        attempts: 1,
-        error: null
-      };
-    },
-    askNvidiaWithMeta: async () => {
-      nvidiaCalled = true;
-      return {
-        text: '{"confidence_percent": 64, "risk_note": "Boundary call executed for NVIDIA."}',
-        attempts: 1,
-        error: null
-      };
-    }
-  });
-
-  assert.equal(groqCalled, true);
-  assert.equal(nvidiaCalled, true);
-  assert.equal(result.aiStatus, 'SUCCESS');
-  assert.equal(result.aiConfidence, 67);
-  assert.equal(result.aiAttempts, 1);
-  assert.equal(result.nvidiaStatus, 'SUCCESS');
-  assert.equal(result.nvidiaConfidence, 64);
-  assert.equal(result.nvidiaAttempts, 1);
+  assert.equal(result.finalTradeDecision, 'SKIP');
+  assert.equal(result.aiDecision, 'REJECT');
+  assert.equal(result.groqTradeCall, 'SKIP');
+  assert.equal(result.nvidiaTradeCall, 'SKIP');
+  assert.ok(result.contradictionList.length >= 2);
 });

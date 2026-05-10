@@ -34,7 +34,7 @@ systemConfigSchema.statics.setValue = async function(key, value) {
   return await this.findOneAndUpdate(
     { key },
     { key, value, updatedAt: new Date() },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: 'after' }
   );
 };
 

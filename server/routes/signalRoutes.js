@@ -1,6 +1,5 @@
 const express = require('express');
 const router = express.Router();
-const { requireWriteAuth } = require('../middleware/requireWriteAuth');
 const {
   createSignal,
   getActiveSignals,
@@ -10,11 +9,11 @@ const {
   getStats
 } = require('../controllers/signalController');
 
-router.post('/', requireWriteAuth, createSignal);
+router.post('/', createSignal);
 router.get('/', getActiveSignals);
 router.get('/all', getAllSignals);
 router.get('/stats', getStats);
-router.patch('/:id/take', requireWriteAuth, takeSignal);
-router.patch('/:id/miss', requireWriteAuth, missSignal);
+router.patch('/:id/take', takeSignal);
+router.patch('/:id/miss', missSignal);
 
 module.exports = router;

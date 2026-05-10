@@ -27,6 +27,16 @@ function applyGuardrailPenalties(context = {}) {
     penalty -= 3;
     flags.push('UNSTABLE_ORDERBOOK_RATIO');
   }
+  if (Array.isArray(orderBookLiquidity?.flags)) {
+    if (orderBookLiquidity.flags.includes('DISAPPEARING_LIQUIDITY')) {
+      penalty -= 4;
+      flags.push('DISAPPEARING_LIQUIDITY');
+    }
+    if (orderBookLiquidity.flags.includes('DEPTH_SPOOF_RISK')) {
+      penalty -= 4;
+      flags.push('DEPTH_SPOOF_RISK');
+    }
+  }
 
   const spreadPct = Number(executionQualityData?.spreadPct);
   const slippageRisk = String(executionQualityData?.slippageRisk || '').toUpperCase();

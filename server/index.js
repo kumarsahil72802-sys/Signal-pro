@@ -7,7 +7,6 @@ const connectDB = require("./config/db");
 const signalRoutes = require("./routes/signalRoutes");
 const marketRoutes = require("./routes/marketRoutes");
 const newsRoutes = require("./routes/newsRoutes");
-const authRoutes = require("./routes/authRoutes");
 const { startSignalMonitor, getMonitorStatus } = require("./services/signalMonitor");
 const { startSignalEngine, getEngineStatus, getDynamicThreshold, getLearningDiagnostics } = require("./services/signalEngine");
 const { initScheduler } = require("./services/scheduler");
@@ -15,7 +14,6 @@ const { enforceSignalRetentionPolicy } = require("./services/signalRetentionServ
 const SystemConfig = require("./models/SystemConfig");
 const { buildWinrateDiagnostics } = require("./services/winrateDiagnosticsService");
 const { settings } = require("./services/signalEngine/config");
-const { isJwtAuthConfigured } = require("./services/authService");
 
 const app = express();
 
@@ -27,9 +25,6 @@ const allowedOrigins = String(process.env.CORS_ORIGINS || "")
   .split(",")
   .map((value) => value.trim())
   .filter(Boolean);
-const writeAuthDisabled = String(process.env.DISABLE_WRITE_AUTH || "").trim().toLowerCase() === "true";
-const hasWriteApiKey = String(process.env.SIGNAL_WRITE_API_KEY || "").trim().length > 0;
-const hasJwtAuth = isJwtAuthConfigured();
 
 if (!process.env.MONGO_URI) {
   throw new Error("MONGO_URI is required");
@@ -37,14 +32,6 @@ if (!process.env.MONGO_URI) {
 
 if (isProduction && allowedOrigins.length === 0) {
   throw new Error("CORS_ORIGINS is required in production");
-}
-
-if (isProduction && writeAuthDisabled) {
-  console.warn("[Security] DISABLE_WRITE_AUTH=true in production. Enable only in tightly controlled private deployments.");
-}
-
-if (isProduction && !writeAuthDisabled && !hasWriteApiKey && !hasJwtAuth) {
-  throw new Error("Configure JWT auth (ADMIN_EMAIL/ADMIN_PASSWORD/AUTH_JWT_SECRET) or SIGNAL_WRITE_API_KEY in production");
 }
 
 if (trustProxy) {
@@ -127,7 +114,6 @@ app.get("/", (req, res) => {
 app.use("/api/signals", signalRoutes);
 app.use("/api/market", marketRoutes);
 app.use("/api/news", newsRoutes);
-app.use("/api/auth", authRoutes);
 
 app.use((err, req, res, next) => {
   console.error("Unhandled error:", err.message);

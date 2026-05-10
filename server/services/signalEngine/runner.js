@@ -21,6 +21,7 @@ const {
 const { getBTCTrend } = require('./analysis');
 const { generateSignalForCoin } = require('./signalGenerator');
 const { analyzePerformance } = require('../aiLearning');
+const { startRealtimeMarketData, registerRealtimeSymbols } = require('../binanceRealtimeService');
 const {
   ensureWinrateBaseline,
   buildWinrateDiagnostics
@@ -54,6 +55,8 @@ const {
   SIGNAL_AI_RETRY_COUNT,
   SIGNAL_AI_RETRY_BACKOFF_MS,
   SIGNAL_AI_TIMEOUT_MS,
+  SIGNAL_USE_FUTURES_CONTEXT,
+  SIGNAL_USE_REALTIME_CONTEXT,
   SIGNAL_MIN_SIGNALS_PER_DAY,
   SIGNAL_SUPPLY_LOOKBACK_HOURS,
   SIGNAL_SUPPLY_ADJUST_STEP,
@@ -289,6 +292,10 @@ async function runEngine() {
 
     console.log(`[ENGINE] Analyzing ${coinsToAnalyze.length} coin(s). Selector: ${COIN_SELECTOR}`);
 
+    if (SIGNAL_USE_REALTIME_CONTEXT) {
+      registerRealtimeSymbols(coinsToAnalyze);
+    }
+
     // Fetch global BTC trend once per cycle to avoid redundant API calls
     const btcTrend = await getBTCTrend();
 
@@ -326,6 +333,10 @@ async function startSignalEngine() {
   setEngineRunning(true);
   setEngineStartTime(new Date());
 
+  if (SIGNAL_USE_REALTIME_CONTEXT) {
+    startRealtimeMarketData();
+  }
+
   runEngine().catch((error) => {
     console.error(`[ENGINE] Initial run failed: ${error.message}`);
   });
@@ -335,7 +346,7 @@ async function startSignalEngine() {
     });
   }, CHECK_INTERVAL_MS);
   console.log(
-    `[ENGINE] Started. Profile:${SIGNAL_PROFILE} | Selector:${COIN_SELECTOR} | Interval:${Math.round(CHECK_INTERVAL_MS / 1000)}s | MaxCoins:${SIGNAL_MAX_COINS} | Cooldown:${SIGNAL_COOLDOWN_HOURS}h | Validity:${SIGNAL_VALIDITY_HOURS}h | 4HHard:${SIGNAL_USE_4H_HARD_FILTER} | BTCHard:${SIGNAL_USE_BTC_HARD_BLOCK} | AIMode:${SIGNAL_AI_MODE} | AIEnrich:${SIGNAL_AI_ENRICHMENT_TIMING} | AIRetry:${SIGNAL_AI_RETRY_COUNT}@${SIGNAL_AI_RETRY_BACKOFF_MS}ms | AITimeout:${SIGNAL_AI_TIMEOUT_MS}ms | AIReject:${SIGNAL_AI_REJECT_MODE} | LiquidityReject:${SIGNAL_LIQUIDITY_REJECT_MODE} | Depth:${SIGNAL_DEPTH_LIMIT} | DepthRange:${SIGNAL_ORDERBOOK_RANGE_PCT}% | SlopeMin:${SIGNAL_TRIGGER_SLOPE_MIN_ABS} | EMAProx:${SIGNAL_EMA_PROXIMITY_PCT}% | EMATest:${SIGNAL_EMA_TEST_PCT}% | RangeSlopeMax:${SIGNAL_RANGING_SLOPE_MAX} | RangeBBMax:${SIGNAL_RANGING_BB_MAX}%`
+    `[ENGINE] Started. Profile:${SIGNAL_PROFILE} | Selector:${COIN_SELECTOR} | Interval:${Math.round(CHECK_INTERVAL_MS / 1000)}s | MaxCoins:${SIGNAL_MAX_COINS} | Cooldown:${SIGNAL_COOLDOWN_HOURS}h | Validity:${SIGNAL_VALIDITY_HOURS}h | 4HHard:${SIGNAL_USE_4H_HARD_FILTER} | BTCHard:${SIGNAL_USE_BTC_HARD_BLOCK} | AIMode:${SIGNAL_AI_MODE} | AIEnrich:${SIGNAL_AI_ENRICHMENT_TIMING} | AIRetry:${SIGNAL_AI_RETRY_COUNT}@${SIGNAL_AI_RETRY_BACKOFF_MS}ms | AITimeout:${SIGNAL_AI_TIMEOUT_MS}ms | FuturesCtx:${SIGNAL_USE_FUTURES_CONTEXT} | RealtimeCtx:${SIGNAL_USE_REALTIME_CONTEXT} | AIReject:${SIGNAL_AI_REJECT_MODE} | LiquidityReject:${SIGNAL_LIQUIDITY_REJECT_MODE} | Depth:${SIGNAL_DEPTH_LIMIT} | DepthRange:${SIGNAL_ORDERBOOK_RANGE_PCT}% | SlopeMin:${SIGNAL_TRIGGER_SLOPE_MIN_ABS} | EMAProx:${SIGNAL_EMA_PROXIMITY_PCT}% | EMATest:${SIGNAL_EMA_TEST_PCT}% | RangeSlopeMax:${SIGNAL_RANGING_SLOPE_MAX} | RangeBBMax:${SIGNAL_RANGING_BB_MAX}%`
   );
 }
 

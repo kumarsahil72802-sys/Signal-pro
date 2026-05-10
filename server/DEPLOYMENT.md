@@ -21,11 +21,11 @@ Fill `.env` with production values:
 - `NODE_ENV=production`
 - `MONGO_URI=<your-mongodb-uri>`
 - `CORS_ORIGINS=https://your-frontend-domain`
-- `SIGNAL_WRITE_API_KEY=<long-random-token>`
-- `DISABLE_WRITE_AUTH=false`
 - `SIGNAL_RECONCILE_ON_MONITOR=true`
 - `SIGNAL_REPLAY_INTERVAL=1m`
 - `SIGNAL_REPLAY_AMBIGUITY_POLICY=CONSERVATIVE`
+- `SIGNAL_USE_FUTURES_CONTEXT=true`
+- `SIGNAL_USE_REALTIME_CONTEXT=true`
 
 ## 3) Start with PM2
 ```bash

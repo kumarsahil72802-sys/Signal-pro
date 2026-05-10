@@ -9,6 +9,10 @@ const {
   SIGNAL_DEPTH_LIMIT
 } = settings;
 
+const DEPTH_HISTORY_LIMIT = 40;
+const DEPTH_HISTORY_MAX_AGE_MS = 20 * 60 * 1000;
+const depthHistoryBySymbol = new Map();
+
 function sumQuoteVolume(levels) {
   return levels.reduce((sum, [price, qty]) => sum + (price * qty), 0);
 }
@@ -116,14 +120,123 @@ function analyzeOrderBookLiquidity(orderBook, currentPrice, trend) {
   };
 }
 
+function pruneDepthHistory(symbol, now = Date.now()) {
+  const history = depthHistoryBySymbol.get(symbol);
+  if (!Array.isArray(history) || history.length === 0) {
+    depthHistoryBySymbol.set(symbol, []);
+    return [];
+  }
+
+  const filtered = history
+    .filter((item) => now - item.ts <= DEPTH_HISTORY_MAX_AGE_MS)
+    .slice(-DEPTH_HISTORY_LIMIT);
+
+  depthHistoryBySymbol.set(symbol, filtered);
+  return filtered;
+}
+
+function addDepthSnapshot(symbol, snapshot) {
+  const history = pruneDepthHistory(symbol);
+  history.push({
+    ts: Date.now(),
+    bidAskVolumeRatio: snapshot.bidAskVolumeRatio,
+    massiveAskWallDetected: snapshot.massiveAskWallDetected,
+    massiveBidWallDetected: snapshot.massiveBidWallDetected,
+    askWallPrice: snapshot.askWallPrice,
+    bidWallPrice: snapshot.bidWallPrice,
+    askWallVolume: snapshot.askWallVolume,
+    bidWallVolume: snapshot.bidWallVolume
+  });
+  depthHistoryBySymbol.set(symbol, history.slice(-DEPTH_HISTORY_LIMIT));
+}
+
+function calculateDepthPersistence(symbol, currentSnapshot) {
+  const history = pruneDepthHistory(symbol);
+  if (!Array.isArray(history) || history.length < 3) {
+    return {
+      adjustment: 0,
+      flags: [],
+      persistence: {
+        samples: history.length,
+        bullishImbalancePct: 0,
+        bearishImbalancePct: 0,
+        bidWallPersistencePct: 0,
+        askWallPersistencePct: 0,
+        spoofRiskScore: 0
+      }
+    };
+  }
+
+  const bullishImbalanceCount = history.filter((item) => Number(item.bidAskVolumeRatio) >= 1.15).length;
+  const bearishImbalanceCount = history.filter((item) => Number(item.bidAskVolumeRatio) <= 0.85).length;
+  const bidWallSeen = history.filter((item) => item.massiveBidWallDetected).length;
+  const askWallSeen = history.filter((item) => item.massiveAskWallDetected).length;
+
+  const samples = history.length;
+  const bullishImbalancePct = (bullishImbalanceCount / samples) * 100;
+  const bearishImbalancePct = (bearishImbalanceCount / samples) * 100;
+  const bidWallPersistencePct = (bidWallSeen / samples) * 100;
+  const askWallPersistencePct = (askWallSeen / samples) * 100;
+
+  const previous = history[samples - 2] || null;
+  const nowHasAskWall = Boolean(currentSnapshot.massiveAskWallDetected);
+  const nowHasBidWall = Boolean(currentSnapshot.massiveBidWallDetected);
+  const disappearingAskWall = previous?.massiveAskWallDetected && !nowHasAskWall;
+  const disappearingBidWall = previous?.massiveBidWallDetected && !nowHasBidWall;
+
+  const spoofRiskScore = (disappearingAskWall || disappearingBidWall ? 50 : 0)
+    + (Math.max(0, 60 - Math.max(bidWallPersistencePct, askWallPersistencePct)));
+
+  let adjustment = 0;
+  const flags = [];
+
+  if (bullishImbalancePct >= 65) {
+    adjustment += 4;
+    flags.push('PERSISTENT_BID_PRESSURE');
+  }
+  if (bearishImbalancePct >= 65) {
+    adjustment -= 4;
+    flags.push('PERSISTENT_ASK_PRESSURE');
+  }
+
+  if (disappearingAskWall || disappearingBidWall) {
+    adjustment -= 5;
+    flags.push('DISAPPEARING_LIQUIDITY');
+  }
+
+  if (spoofRiskScore >= 75) {
+    adjustment -= 4;
+    flags.push('DEPTH_SPOOF_RISK');
+  }
+
+  return {
+    adjustment,
+    flags,
+    persistence: {
+      samples,
+      bullishImbalancePct: Number(bullishImbalancePct.toFixed(2)),
+      bearishImbalancePct: Number(bearishImbalancePct.toFixed(2)),
+      bidWallPersistencePct: Number(bidWallPersistencePct.toFixed(2)),
+      askWallPersistencePct: Number(askWallPersistencePct.toFixed(2)),
+      spoofRiskScore: Number(spoofRiskScore.toFixed(2))
+    }
+  };
+}
+
 async function getOrderBookLiquidityForSignal(coin, currentPrice, trend) {
   try {
     const orderBook = await getOrderBook(coin, SIGNAL_DEPTH_LIMIT);
     const liquidity = analyzeOrderBookLiquidity(orderBook, currentPrice, trend);
     if (!liquidity) return null;
 
+    addDepthSnapshot(coin, liquidity);
+    const depthPersistence = calculateDepthPersistence(coin, liquidity);
+    liquidity.depthPersistence = depthPersistence.persistence;
+    liquidity.adjustment = depthPersistence.adjustment;
+    liquidity.flags = depthPersistence.flags;
+
     console.log(
-      `[ENGINE] ${coin} DEPTH -> ratio:${liquidity.bidAskVolumeRatio.toFixed(2)} | askWall:${liquidity.massiveAskWallDetected ? 'YES' : 'NO'} | block:${liquidity.blockedByLiquidity ? 'YES' : 'NO'}`
+      `[ENGINE] ${coin} DEPTH -> ratio:${liquidity.bidAskVolumeRatio.toFixed(2)} | askWall:${liquidity.massiveAskWallDetected ? 'YES' : 'NO'} | persist:${liquidity.depthPersistence?.samples || 0} | block:${liquidity.blockedByLiquidity ? 'YES' : 'NO'}`
     );
     return liquidity;
   } catch (error) {

@@ -157,12 +157,12 @@ function getSignalQuality(confidence) {
 
 /**
  * Quality filter check - returns { passed: boolean, reason: string }
- * Only rejects if confidence < 50 (no data/API failures handled separately)
+ * Rejects if confidence falls below hard floor (50)
  */
 function runQualityFilters(confidence, volumeData, momentum) {
-  // Minimum confidence threshold for any signal
+  // Hard floor: never allow signal generation below 50 confidence.
   if (confidence < 50) {
-    return { passed: false, reason: 'Confidence below minimum (50)' };
+    return { passed: false, reason: 'Confidence below hard minimum (50)' };
   }
 
   // Dynamic threshold check for higher quality signals

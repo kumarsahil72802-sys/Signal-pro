@@ -38,6 +38,10 @@ const Stats = ({ loading }) => {
   const losses = Number(safeStats.losses || 0)
   const winRate = Number(safeStats.winRate || 0)
   const last10 = safeStats.last10 || { total: 0, wins: 0, winRate: 0 }
+  const last10Sequence = Array.isArray(last10.sequence) ? last10.sequence : []
+  const displaySequence = last10Sequence.length > 0
+    ? last10Sequence
+    : Array.from({ length: last10.total }).map((_, i) => (i < last10.wins ? 'W' : 'L'))
   const avgRR = Number(safeStats.avgRR || 0)
   const bestCoin = safeStats.bestCoin || null
 
@@ -79,19 +83,20 @@ const Stats = ({ loading }) => {
         <div className="bg-[#111b2d] rounded-xl border border-[#2a3a55] p-4 mb-6">
           <h3 className="text-sm font-medium text-[#c3d2eb] mb-3">Last 10 Results</h3>
           <div className="flex flex-wrap gap-2">
-            {Array.from({ length: last10.total }).map((_, i) => (
+            {displaySequence.map((result, i) => (
               <div
                 key={i}
                 className={`w-8 h-8 rounded flex items-center justify-center text-xs font-bold ${
-                  i < last10.wins
+                  result === 'W'
                     ? 'bg-[#173427] text-[#64f2b3]'
                     : 'bg-[#3b1b26] text-[#ff8fa1]'
                 }`}
               >
-                {i < last10.wins ? 'W' : 'L'}
+                {result === 'W' ? 'W' : 'L'}
               </div>
             ))}
           </div>
+          <p className="text-xs text-[#6f83a6] mt-2">Order: latest to oldest</p>
           <p className="text-sm text-[#8ea2c4] mt-3">
             Last 10: {last10.wins}W / {last10.total - last10.wins}L ({last10.winRate}% win rate)
           </p>

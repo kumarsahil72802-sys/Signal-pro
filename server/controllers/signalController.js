@@ -273,6 +273,9 @@ const getStats = async (req, res) => {
     const last10Wins = last10Signals.filter(s => s.result === 'TARGET_HIT').length;
     const last10Total = last10Signals.length;
     const last10WinRate = last10Total > 0 ? (last10Wins / last10Total) * 100 : 0;
+    const last10Sequence = last10Signals.map((signal) => (
+      signal.result === 'TARGET_HIT' ? 'W' : 'L'
+    ));
 
     // Aggregate per-coin stats for TAKEN signals only
     const coinStats = await Signal.aggregate([
@@ -342,7 +345,8 @@ const getStats = async (req, res) => {
       last10: {
         total: last10Total,
         wins: last10Wins,
-        winRate: Math.round(last10WinRate * 10) / 10
+        winRate: Math.round(last10WinRate * 10) / 10,
+        sequence: last10Sequence
       },
       // NEW fields for proper win rate calculation
       totalTaken,
