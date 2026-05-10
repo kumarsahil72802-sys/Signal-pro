@@ -317,7 +317,7 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen text-[#d7e1f3] relative overflow-hidden">
+    <div className="min-h-screen text-[#d7e1f3] relative overflow-x-hidden">
       <div className="pointer-events-none absolute inset-0 opacity-30" style={{
         backgroundImage: 'linear-gradient(rgba(125,169,230,0.14) 1px, transparent 1px), linear-gradient(90deg, rgba(125,169,230,0.14) 1px, transparent 1px)',
         backgroundSize: '48px 48px'

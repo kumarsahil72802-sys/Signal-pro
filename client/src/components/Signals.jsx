@@ -738,10 +738,27 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
 
 const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}, qualityApiFailed = false, canTrade = true }) => {
   const [expandedId, setExpandedId] = useState(null)
+  const [searchTerm, setSearchTerm] = useState('')
+  const [showScrollTop, setShowScrollTop] = useState(false)
+  const [showPinnedSectionNav, setShowPinnedSectionNav] = useState(false)
+  const vaultTopRef = useRef(null)
+  const sectionTabsAnchorRef = useRef(null)
   const generatedRef = useRef(null)
   const targetHitRef = useRef(null)
   const slHitRef = useRef(null)
   const expiredRef = useRef(null)
+
+  useEffect(() => {
+    const onScroll = () => {
+      setShowScrollTop(window.scrollY > 420)
+      const anchorTop = sectionTabsAnchorRef.current?.getBoundingClientRect?.().top
+      setShowPinnedSectionNav(Number.isFinite(anchorTop) ? anchorTop <= 96 : false)
+    }
+
+    onScroll()
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [])
 
   if (loading) {
     return (
@@ -763,10 +780,18 @@ const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}
     )
   }
 
-  const generatedSignals = signals.filter((s) => s.status === 'ACTIVE' || s.status === 'TAKEN')
-  const targetHitSignals = signals.filter((s) => s.result === 'TARGET_HIT')
-  const slHitSignals = signals.filter((s) => s.result === 'SL_HIT')
-  const expiredSignals = signals.filter((s) => s.result === 'EXPIRED')
+  const searchTermTrimmed = searchTerm.trim()
+  const normalizedSearch = searchTermTrimmed.toUpperCase()
+  const hasActiveSearch = normalizedSearch.length > 0
+  const filteredSignals = hasActiveSearch
+    ? signals.filter((signal) => String(signal?.coin || '').toUpperCase().includes(normalizedSearch))
+    : signals
+  const hasMatchingSignals = filteredSignals.length > 0
+
+  const generatedSignals = filteredSignals.filter((s) => s.status === 'ACTIVE' || s.status === 'TAKEN')
+  const targetHitSignals = filteredSignals.filter((s) => s.result === 'TARGET_HIT')
+  const slHitSignals = filteredSignals.filter((s) => s.result === 'SL_HIT')
+  const expiredSignals = filteredSignals.filter((s) => s.result === 'EXPIRED')
 
   const renderSignalGroup = (groupSignals) => (
     <div className="space-y-3">
@@ -791,46 +816,80 @@ const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}
     sectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
+  const scrollToVaultTop = () => {
+    if (!vaultTopRef.current) return
+    vaultTopRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  const renderSectionNavButtons = () => (
+    <>
+      <button
+        type="button"
+        onClick={() => jumpToSection(generatedRef)}
+        disabled={generatedSignals.length === 0}
+        className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#162a45] text-[#8fc3ff] border border-[#34527c] hover:bg-[#1b3354] disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        Generated ({generatedSignals.length})
+      </button>
+      <button
+        type="button"
+        onClick={() => jumpToSection(targetHitRef)}
+        disabled={targetHitSignals.length === 0}
+        className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#173427] text-[#64f2b3] border border-[#2a6b4e] hover:bg-[#1c4231] disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        Target Hit ({targetHitSignals.length})
+      </button>
+      <button
+        type="button"
+        onClick={() => jumpToSection(slHitRef)}
+        disabled={slHitSignals.length === 0}
+        className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#332238] text-[#ffb0c2] border border-[#6b3f4f] hover:bg-[#412b46] disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        SL Hit ({slHitSignals.length})
+      </button>
+      <button
+        type="button"
+        onClick={() => jumpToSection(expiredRef)}
+        disabled={expiredSignals.length === 0}
+        className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#243247] text-[#bfd0ea] border border-[#3f5575] hover:bg-[#2b3c54] disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        Expired ({expiredSignals.length})
+      </button>
+    </>
+  )
+
   return (
     <div>
-      <div className="mb-6">
+      <div ref={vaultTopRef} className="mb-6 scroll-mt-28">
         <h2 className="text-2xl font-bold text-white">Signal Vault</h2>
         <p className="text-[#8ea2c4] text-sm mt-1">
           {generatedSignals.length} generated | {targetHitSignals.length} target hit | {slHitSignals.length} SL hit | {expiredSignals.length} expired
         </p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => jumpToSection(generatedRef)}
-            disabled={generatedSignals.length === 0}
-            className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#162a45] text-[#8fc3ff] border border-[#34527c] hover:bg-[#1b3354] disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            Generated ({generatedSignals.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => jumpToSection(targetHitRef)}
-            disabled={targetHitSignals.length === 0}
-            className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#173427] text-[#64f2b3] border border-[#2a6b4e] hover:bg-[#1c4231] disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            Target Hit ({targetHitSignals.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => jumpToSection(slHitRef)}
-            disabled={slHitSignals.length === 0}
-            className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#332238] text-[#ffb0c2] border border-[#6b3f4f] hover:bg-[#412b46] disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            SL Hit ({slHitSignals.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => jumpToSection(expiredRef)}
-            disabled={expiredSignals.length === 0}
-            className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#243247] text-[#bfd0ea] border border-[#3f5575] hover:bg-[#2b3c54] disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            Expired ({expiredSignals.length})
-          </button>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-2 rounded-lg border border-[#2d476e] bg-[#101f35]/90 px-3 py-2">
+            <span className="text-[11px] uppercase tracking-[0.12em] text-[#8ea2c4]">Search</span>
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Coin name (e.g. BTC)"
+              className="w-44 sm:w-56 bg-transparent text-sm text-white placeholder:text-[#7088af] outline-none"
+            />
+            {hasActiveSearch && (
+              <button
+                type="button"
+                onClick={() => setSearchTerm('')}
+                className="rounded-md border border-[#39557f] bg-[#162a45] px-2 py-0.5 text-xs font-semibold text-[#c7d8f2] hover:bg-[#1f3554]"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          {hasActiveSearch && (
+            <p className="text-xs text-[#9ab0d3]">
+              {filteredSignals.length} match{filteredSignals.length === 1 ? '' : 'es'} for "{searchTermTrimmed}"
+            </p>
+          )}
         </div>
         {qualityApiFailed && (
           <p className="text-xs text-[#ffd56a] mt-2">
@@ -839,9 +898,25 @@ const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}
         )}
       </div>
 
+      <div
+        ref={sectionTabsAnchorRef}
+        className="mb-5 rounded-xl border border-[#294163] bg-[linear-gradient(180deg,rgba(9,20,36,0.95),rgba(10,21,39,0.86))] px-2 py-2"
+      >
+        <div className={`flex flex-wrap gap-2 ${showPinnedSectionNav ? 'invisible' : ''}`}>
+          {renderSectionNavButtons()}
+        </div>
+      </div>
+
       <div className="space-y-4">
+        {!hasMatchingSignals && (
+          <div className="rounded-xl border border-[#2a3a55] bg-[#111b2d] p-6 text-center">
+            <p className="text-[#d4e0f5] font-semibold">No matching coins found</p>
+            <p className="text-sm text-[#8ea2c4] mt-1">Try another symbol like BTC, ETH, SOL, or ADA.</p>
+          </div>
+        )}
+
         {generatedSignals.length > 0 && (
-          <div ref={generatedRef} className="scroll-mt-24">
+          <div ref={generatedRef} className="scroll-mt-40">
             <h3 className="text-sm font-semibold text-[#8ea2c4] uppercase tracking-wider mb-3 flex items-center gap-2">
               <span className="w-2 h-2 bg-[#f0b90b] rounded-full"></span>
               Generated Signals ({generatedSignals.length})
@@ -851,7 +926,7 @@ const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}
         )}
 
         {targetHitSignals.length > 0 && (
-          <div ref={targetHitRef} className="mt-8 scroll-mt-24">
+          <div ref={targetHitRef} className="mt-8 scroll-mt-40">
             <h3 className="text-sm font-semibold text-[#8ea2c4] uppercase tracking-wider mb-3 flex items-center gap-2">
               <span className="w-2 h-2 bg-[#19c37d] rounded-full"></span>
               Target Hit Signals ({targetHitSignals.length})
@@ -861,7 +936,7 @@ const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}
         )}
 
         {slHitSignals.length > 0 && (
-          <div ref={slHitRef} className="mt-8 scroll-mt-24">
+          <div ref={slHitRef} className="mt-8 scroll-mt-40">
             <h3 className="text-sm font-semibold text-[#8ea2c4] uppercase tracking-wider mb-3 flex items-center gap-2">
               <span className="w-2 h-2 bg-[#ff8fa1] rounded-full"></span>
               SL Hit Signals ({slHitSignals.length})
@@ -871,7 +946,7 @@ const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}
         )}
 
         {expiredSignals.length > 0 && (
-          <div ref={expiredRef} className="mt-8 scroll-mt-24">
+          <div ref={expiredRef} className="mt-8 scroll-mt-40">
             <h3 className="text-sm font-semibold text-[#8ea2c4] uppercase tracking-wider mb-3 flex items-center gap-2">
               <span className="w-2 h-2 bg-[#a8b8d7] rounded-full"></span>
               Expired Signals ({expiredSignals.length})
@@ -880,6 +955,26 @@ const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}
           </div>
         )}
       </div>
+
+      {showScrollTop && (
+        <button
+          type="button"
+          onClick={scrollToVaultTop}
+          className="fixed bottom-6 right-6 z-30 rounded-full border border-[#46658e] bg-[#142742]/95 px-4 py-2 text-xs font-bold tracking-wide text-[#d9e7ff] shadow-[0_10px_26px_rgba(6,12,22,0.48)] transition hover:bg-[#1a3356]"
+        >
+          Back To Top
+        </button>
+      )}
+
+      {showPinnedSectionNav && (
+        <div className="fixed left-0 right-0 top-2 sm:top-3 z-40 px-4 sm:px-6">
+          <div className="max-w-7xl mx-auto rounded-xl border border-[#294163] bg-[linear-gradient(180deg,rgba(9,20,36,0.95),rgba(10,21,39,0.88))] px-2 py-2 backdrop-blur">
+            <div className="flex flex-wrap gap-2">
+              {renderSectionNavButtons()}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
