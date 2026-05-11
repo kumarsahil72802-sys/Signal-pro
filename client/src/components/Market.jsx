@@ -166,12 +166,6 @@ const formatSpread = (spreadPct) => {
   return `${spreadPct.toFixed(4)}%`
 }
 
-const formatPressure = (quality, qualityApiFailed) => {
-  if (qualityApiFailed || !quality || quality.unavailable) return 'N/A'
-  if (typeof quality.imbalanceBuyPct !== 'number' || typeof quality.imbalanceSellPct !== 'number') return 'N/A'
-  return `Buy ${quality.imbalanceBuyPct.toFixed(1)}% / Sell ${quality.imbalanceSellPct.toFixed(1)}%`
-}
-
 const formatTimeAgo = (unixSeconds) => {
   if (!unixSeconds) return 'Unknown'
   const publishedAt = new Date(unixSeconds * 1000)
@@ -567,8 +561,10 @@ const MarketCard = memo(function MarketCard({ coin, quality, qualityApiFailed, o
   const changeColor = isPositive ? 'text-[#64f2b3]' : 'text-[#ff8fa1]'
   const bgColor = isPositive ? 'bg-[#112b23]' : 'bg-[#341c25]'
   const executionQuality = (!qualityApiFailed && quality?.executionQuality) ? quality.executionQuality : 'N/A'
-  const slippageRisk = (!qualityApiFailed && quality?.slippageRisk) ? quality.slippageRisk : 'N/A'
   const sparklinePrices = coin?.sparkline_in_7d?.price || []
+  const spreadLabel = formatSpread(quality?.spreadPct)
+  const volumeLabel = formatCompactUsd(Number(coin.total_volume))
+  const rankLabel = coin?.market_cap_rank ? `#${coin.market_cap_rank}` : 'N/A'
 
   return (
     <button
@@ -586,10 +582,13 @@ const MarketCard = memo(function MarketCard({ coin, quality, qualityApiFailed, o
           image={coin.image}
           imageCandidates={coin.image_candidates}
         />
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <p className="font-bold text-sm text-white truncate">{coin.symbol?.toUpperCase()}</p>
           <p className="text-xs text-[#8ea2c4] truncate">{coin.name}</p>
         </div>
+        <span className="shrink-0 rounded-md border border-[#395b87] bg-[#132642] px-2 py-0.5 text-[10px] cc-mono text-[#9fc0ec]">
+          {rankLabel}
+        </span>
       </div>
 
       <p className="text-[1.75rem] leading-none font-extrabold text-white tracking-tight">
@@ -597,31 +596,28 @@ const MarketCard = memo(function MarketCard({ coin, quality, qualityApiFailed, o
       </p>
 
       <div className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-semibold mt-2 ${bgColor} ${changeColor}`}>
-        <span>{isPositive ? 'UP' : 'DN'}</span>
-        {coin.price_change_percentage_24h != null
-          ? `${Math.abs(coin.price_change_percentage_24h).toFixed(2)}%`
-          : 'N/A'
-        }
+        24h {formatSignedPercent(coin.price_change_percentage_24h)}
       </div>
 
       <div className="mt-3">
         <MiniSparkline prices={sparklinePrices} positive={isPositive} />
       </div>
 
-      <div className="mt-3 pt-3 border-t border-[#2a4468] space-y-1">
-        <p className="text-[11px] text-[#8ea2c4]">Spread: <span className="font-semibold text-[#d8e2f3]">{formatSpread(quality?.spreadPct)}</span></p>
-        <p className="text-[11px] text-[#8ea2c4]">Pressure: <span className="font-semibold text-[#d8e2f3]">{formatPressure(quality, qualityApiFailed)}</span></p>
+      <div className="mt-3 pt-3 border-t border-[#2a4468] space-y-2">
         <div className="flex items-center justify-between gap-2">
           <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border ${getExecutionBadgeClass(executionQuality)}`}>
             {executionQuality}
           </span>
           <span className="text-[11px] text-[#8ea2c4]">
-            Slip: <span className="font-semibold text-[#d8e2f3]">{slippageRisk}</span>
+            Spread: <span className="font-semibold text-[#d8e2f3]">{spreadLabel}</span>
           </span>
         </div>
+        <p className="text-[11px] text-[#8ea2c4]">
+          24h Volume: <span className="font-semibold text-[#d8e2f3]">{volumeLabel}</span>
+        </p>
       </div>
 
-      <p className="mt-3 text-[11px] text-[#88a0c8] cc-mono">ENTER to inspect chart + news intelligence</p>
+      <p className="mt-3 text-[11px] text-[#9bb0d3] cc-mono">Tap for full chart + narrative</p>
     </button>
   )
 }, (prevProps, nextProps) => {
