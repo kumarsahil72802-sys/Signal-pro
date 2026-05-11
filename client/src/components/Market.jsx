@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useState } from 'react'
 import { getCoinNews, getMarketChart } from '../services/api'
 
 const MARKET_RENDER_CHUNK = 12
-const CHART_INTERVALS = ['5m', '15m', '1h', '4h', '1d']
+const CHART_INTERVALS = ['1s', '1m', '5m', '15m', '1h', '4h', '1d']
 const CHART_VIEWS = [
   { value: 'line', label: 'Line' },
   { value: 'candles', label: 'Candles' },
@@ -141,6 +141,14 @@ const formatPrice = (value, maxFractionDigits = 2) => {
     minimumFractionDigits: 2,
     maximumFractionDigits: maxFractionDigits,
   })}`
+}
+
+const formatPricePlain = (value, maxFractionDigits = 2) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 'N/A'
+  return value.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: maxFractionDigits,
+  })
 }
 
 const formatCompactUsd = (value) => {
@@ -348,15 +356,20 @@ const DetailChart = ({ points = [], mode = 'line', expanded = false, chartIdPref
   const values = candles.map((candle) => candle.close)
   const width = 820
   const height = 240
-  const padX = 22
-  const padY = 18
+  const padLeft = 22
+  const padRight = 84
+  const padTop = 18
+  const padBottom = 18
+  const chartWidth = width - padLeft - padRight
+  const chartHeight = height - padTop - padBottom
   const min = Math.min(...candles.map((candle) => candle.low))
   const max = Math.max(...candles.map((candle) => candle.high))
   const range = Math.max(max - min, 1e-9)
+  const priceDigits = Math.abs(max) >= 1 ? 2 : 6
 
   const linePoints = values.map((value, index) => {
-    const x = padX + (index / (values.length - 1)) * (width - padX * 2)
-    const y = padY + ((max - value) / range) * (height - padY * 2)
+    const x = padLeft + (index / (values.length - 1)) * chartWidth
+    const y = padTop + ((max - value) / range) * chartHeight
     return { x, y }
   })
 
@@ -364,14 +377,23 @@ const DetailChart = ({ points = [], mode = 'line', expanded = false, chartIdPref
     .map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
     .join(' ')
 
-  const fillPath = `${linePath} L ${linePoints[linePoints.length - 1].x.toFixed(2)} ${(height - padY).toFixed(2)} L ${linePoints[0].x.toFixed(2)} ${(height - padY).toFixed(2)} Z`
+  const fillPath = `${linePath} L ${linePoints[linePoints.length - 1].x.toFixed(2)} ${(height - padBottom).toFixed(2)} L ${linePoints[0].x.toFixed(2)} ${(height - padBottom).toFixed(2)} Z`
   const isPositive = values[values.length - 1] >= values[0]
   const fillId = `${chartIdPrefix}-${mode}-fill`
-  const slotWidth = (width - (padX * 2)) / candles.length
+  const slotWidth = chartWidth / candles.length
   const bodyWidth = Math.max(2.2, Math.min(10, slotWidth * 0.62))
-  const yFromPrice = (price) => padY + ((max - price) / range) * (height - (padY * 2))
+  const yFromPrice = (price) => padTop + ((max - price) / range) * chartHeight
   const chartHeightClass = expanded ? 'h-[65vh] min-h-[420px] max-h-[760px]' : 'h-56'
   const gridRows = [0, 0.25, 0.5, 0.75, 1]
+  const latestPrice = candles[candles.length - 1]?.close
+  const latestY = yFromPrice(latestPrice)
+  const latestLabel = formatPricePlain(latestPrice, priceDigits)
+  const latestLineColor = isPositive ? '#64f2b3' : '#ff8fa1'
+  const priceAxisX = width - 6
+  const priceBadgeX = width - padRight + 6
+  const priceBadgeW = 74
+  const priceBadgeH = 18
+  const priceBadgeY = Math.max(padTop, Math.min((height - padBottom) - priceBadgeH, latestY - (priceBadgeH / 2)))
 
   return (
     <div className="rounded-2xl border border-[#273958] bg-[#0d172a] p-3 sm:p-4">
@@ -384,27 +406,49 @@ const DetailChart = ({ points = [], mode = 'line', expanded = false, chartIdPref
         </defs>
 
         {gridRows.map((ratio) => {
-          const y = padY + ((height - (padY * 2)) * ratio)
+          const y = padTop + (chartHeight * ratio)
+          const rowPrice = max - (range * ratio)
           return (
-            <line
-              key={`grid-${ratio}`}
-              x1={padX}
-              y1={y}
-              x2={width - padX}
-              y2={y}
-              stroke="#203550"
-              strokeWidth="1"
-              strokeDasharray={ratio === 1 ? '0' : '4 5'}
-            />
+            <g key={`grid-${ratio}`}>
+              <line
+                x1={padLeft}
+                y1={y}
+                x2={width - padRight}
+                y2={y}
+                stroke="#203550"
+                strokeWidth="1"
+                strokeDasharray={ratio === 1 ? '0' : '4 5'}
+              />
+              <text
+                x={priceAxisX}
+                y={y + 3}
+                textAnchor="end"
+                fontSize="10"
+                fill="#8ea6cc"
+              >
+                {formatPricePlain(rowPrice, priceDigits)}
+              </text>
+            </g>
           )
         })}
 
-        <line x1={padX} y1={height - padY} x2={width - padX} y2={height - padY} stroke="#29405f" strokeWidth="1" />
-        <line x1={padX} y1={padY} x2={padX} y2={height - padY} stroke="#29405f" strokeWidth="1" />
+        <line x1={padLeft} y1={height - padBottom} x2={width - padRight} y2={height - padBottom} stroke="#29405f" strokeWidth="1" />
+        <line x1={padLeft} y1={padTop} x2={padLeft} y2={height - padBottom} stroke="#29405f" strokeWidth="1" />
+        <line x1={width - padRight} y1={padTop} x2={width - padRight} y2={height - padBottom} stroke="#29405f" strokeWidth="1" />
+        <line
+          x1={padLeft}
+          y1={latestY}
+          x2={width - padRight}
+          y2={latestY}
+          stroke={latestLineColor}
+          strokeWidth="1"
+          strokeDasharray="4 4"
+          opacity="0.8"
+        />
 
         {mode === 'candles' ? (
           candles.map((candle, index) => {
-            const xCenter = padX + (slotWidth * index) + (slotWidth / 2)
+            const xCenter = padLeft + (slotWidth * index) + (slotWidth / 2)
             const yOpen = yFromPrice(candle.open)
             const yClose = yFromPrice(candle.close)
             const yHigh = yFromPrice(candle.high)
@@ -448,6 +492,27 @@ const DetailChart = ({ points = [], mode = 'line', expanded = false, chartIdPref
             />
           </>
         )}
+
+        <rect
+          x={priceBadgeX}
+          y={priceBadgeY}
+          width={priceBadgeW}
+          height={priceBadgeH}
+          rx="5"
+          fill="#152a49"
+          stroke={latestLineColor}
+          strokeWidth="1"
+        />
+        <text
+          x={priceBadgeX + (priceBadgeW / 2)}
+          y={priceBadgeY + 12}
+          textAnchor="middle"
+          fontSize="10.5"
+          fill="#d7e4fb"
+          fontWeight="600"
+        >
+          {latestLabel}
+        </text>
       </svg>
 
       <div className="mt-3 flex items-center justify-between text-xs text-[#8ea2c4]">
@@ -820,6 +885,9 @@ function CoinDetailOverlay({
   const binanceTradeUrl = buildBinanceTradeUrl(activePairSymbol)
   const tradingViewUrl = buildTradingViewChartUrl(activePairSymbol)
   const currentPrice = toFiniteNumber(coin.current_price)
+  const chartLatestPrice = chartValues.length > 0 ? toFiniteNumber(chartValues[chartValues.length - 1]) : null
+  const displayChartPrice = Number.isFinite(chartLatestPrice) ? chartLatestPrice : currentPrice
+  const chartPriceModeLabel = usingFallbackChart ? 'Cached' : 'Live'
   const low24 = toFiniteNumber(coin.low_24h)
   const high24 = toFiniteNumber(coin.high_24h)
   const ath = toFiniteNumber(coin.ath)
@@ -995,6 +1063,19 @@ function CoinDetailOverlay({
                     <div>
                       <p className="text-lg font-bold text-white">Market Structure</p>
                       <p className="text-xs text-[#95acd2] mt-1">Range behavior, intraday trend and execution map</p>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <span className="rounded-md border border-[#345985] bg-[#132744] px-2 py-1 text-[11px] cc-mono text-[#cfe0ff]">
+                          Now {formatPrice(displayChartPrice, Math.abs(Number(displayChartPrice) || 0) >= 1 ? 2 : 6)}
+                        </span>
+                        {chartChangePct != null && (
+                          <span className={`rounded-md border px-2 py-1 text-[11px] cc-mono ${chartChangePct >= 0 ? 'border-[#2f6e58] bg-[#133428] text-[#89f2c9]' : 'border-[#713345] bg-[#3a202c] text-[#ffb3c3]'}`}>
+                            Interval {formatSignedPercent(chartChangePct)}
+                          </span>
+                        )}
+                        <span className="rounded-md border border-[#2f4a72] bg-[#111f39] px-2 py-1 text-[11px] cc-mono text-[#9db6dd]">
+                          {chartPriceModeLabel} chart
+                        </span>
+                      </div>
                     </div>
                     <div className="flex flex-wrap items-center justify-end gap-2">
                       <div className="inline-flex p-1 rounded-lg bg-[#111f39] border border-[#2d456f]">
