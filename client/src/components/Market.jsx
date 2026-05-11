@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { getCoinNews, getMarketChart } from '../services/api'
 
 const MARKET_RENDER_CHUNK = 12
@@ -723,6 +723,9 @@ function CoinDetailOverlay({
   prevCoinSymbol = '',
   nextCoinSymbol = '',
 }) {
+  const overlayRef = useRef(null)
+  const dialogRef = useRef(null)
+  const previousFocusRef = useRef(null)
   const [chartInterval, setChartInterval] = useState('15m')
   const [chartView, setChartView] = useState('line')
   const [chartFullscreen, setChartFullscreen] = useState(false)
@@ -838,6 +841,56 @@ function CoinDetailOverlay({
   }, [coin?.symbol])
 
   useEffect(() => {
+    const overlayNode = overlayRef.current
+    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+
+    const getFocusableElements = () => {
+      if (!overlayNode) return []
+      return Array.from(overlayNode.querySelectorAll(
+        'a[href], button:not([disabled]):not([tabindex="-1"]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )).filter((element) => element instanceof HTMLElement && element.getClientRects().length > 0)
+    }
+
+    const focusInitialTarget = () => {
+      const preferredTarget = overlayNode?.querySelector('[data-dialog-initial-focus="true"]')
+      if (preferredTarget instanceof HTMLElement) {
+        preferredTarget.focus()
+        return
+      }
+
+      const firstFocusable = getFocusableElements()[0]
+      if (firstFocusable) {
+        firstFocusable.focus()
+        return
+      }
+
+      dialogRef.current?.focus()
+    }
+
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const frame = window.requestAnimationFrame(focusInitialTarget)
+
+    return () => {
+      window.cancelAnimationFrame(frame)
+      document.body.style.overflow = previousOverflow
+
+      const previousFocusedElement = previousFocusRef.current
+      if (previousFocusedElement instanceof HTMLElement && document.contains(previousFocusedElement)) {
+        previousFocusedElement.focus({ preventScroll: true })
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    const overlayNode = overlayRef.current
+    const getFocusableElements = () => {
+      if (!overlayNode) return []
+      return Array.from(overlayNode.querySelectorAll(
+        'a[href], button:not([disabled]):not([tabindex="-1"]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )).filter((element) => element instanceof HTMLElement && element.getClientRects().length > 0)
+    }
+
     const onKeyDown = (event) => {
       if (event.key === 'ArrowLeft' && hasPrevCoin) {
         event.preventDefault()
@@ -849,27 +902,52 @@ function CoinDetailOverlay({
         onNextCoin?.()
         return
       }
-      if (event.key !== 'Escape') return
-      if (chartFullscreen) {
-        setChartFullscreen(false)
+      if (event.key === 'Escape') {
+        if (chartFullscreen) {
+          setChartFullscreen(false)
+          return
+        }
+        onClose()
         return
       }
-      onClose()
+      if (event.key !== 'Tab') return
+
+      const focusableElements = getFocusableElements()
+      if (focusableElements.length === 0) {
+        event.preventDefault()
+        dialogRef.current?.focus()
+        return
+      }
+
+      const first = focusableElements[0]
+      const last = focusableElements[focusableElements.length - 1]
+      const active = document.activeElement
+      const isInsideOverlay = overlayNode?.contains(active)
+
+      if (event.shiftKey) {
+        if (!isInsideOverlay || active === first) {
+          event.preventDefault()
+          last.focus()
+        }
+        return
+      }
+
+      if (!isInsideOverlay || active === last) {
+        event.preventDefault()
+        first.focus()
+      }
     }
 
-    const previousOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    window.addEventListener('keydown', onKeyDown)
-
+    document.addEventListener('keydown', onKeyDown)
     return () => {
-      window.removeEventListener('keydown', onKeyDown)
-      document.body.style.overflow = previousOverflow
+      document.removeEventListener('keydown', onKeyDown)
     }
   }, [chartFullscreen, hasNextCoin, hasPrevCoin, onClose, onNextCoin, onPrevCoin])
 
   if (!coin) return null
 
   const isPositive = (coin.price_change_percentage_24h || 0) >= 0
+  const dialogTitleId = `coin-detail-title-${String(coin.id || coin.symbol || 'asset').replace(/[^a-z0-9_-]/ig, '').toLowerCase()}`
   const executionQuality = (!qualityApiFailed && quality?.executionQuality) ? quality.executionQuality : 'N/A'
   const fallbackChartPoints = buildSparklineDetailPoints(coin?.sparkline_in_7d?.price)
   const hasLiveChart = chartPoints.length >= 2
@@ -943,17 +1021,25 @@ function CoinDetailOverlay({
   const fundamentalsCoveragePct = Math.round((coreFundamentalCount / coreFundamentalTotal) * 100)
 
   return (
-    <div className="fixed inset-0 z-50">
+    <div ref={overlayRef} className="fixed inset-0 z-50">
       <button
         type="button"
         aria-label="Close coin details"
         onClick={onClose}
+        tabIndex={-1}
         className="absolute inset-0 bg-[#02050d]/80 backdrop-blur-sm"
       />
 
       <div className="relative z-10 h-full overflow-y-auto">
         <div className="min-h-full px-3 py-4 sm:px-6 sm:py-6 lg:px-10">
-          <section className="mx-auto max-w-7xl overflow-hidden rounded-3xl border border-[#2a4167] bg-[linear-gradient(150deg,#081326_0%,#0d1f3f_45%,#091733_100%)] shadow-[0_40px_80px_rgba(2,6,17,0.72)]">
+          <section
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={dialogTitleId}
+            tabIndex={-1}
+            className="mx-auto max-w-7xl overflow-hidden rounded-3xl border border-[#2a4167] bg-[linear-gradient(150deg,#081326_0%,#0d1f3f_45%,#091733_100%)] shadow-[0_40px_80px_rgba(2,6,17,0.72)]"
+          >
             <div className="relative border-b border-[#274168] px-4 py-5 sm:px-6 sm:py-6">
               <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_85%_10%,rgba(83,216,255,0.16),transparent_40%),radial-gradient(circle_at_10%_80%,rgba(255,190,46,0.12),transparent_35%)]" />
               <div className="relative flex items-start justify-between gap-4">
@@ -962,7 +1048,7 @@ function CoinDetailOverlay({
                     <CoinIcon symbol={coin.symbol} name={coin.name} image={coin.image} imageCandidates={coin.image_candidates} />
                     <div className="min-w-0">
                       <p className="cc-mono text-[11px] uppercase tracking-[0.2em] text-[#8eacd6]">Asset Intelligence Room</p>
-                      <h2 className="mt-1 text-2xl sm:text-3xl font-black text-white truncate">{coin.name}</h2>
+                      <h2 id={dialogTitleId} className="mt-1 text-2xl sm:text-3xl font-black text-white truncate">{coin.name}</h2>
                       <p className="text-sm text-[#9bb3d8]">{displayPair}</p>
                     </div>
                   </div>
@@ -1044,6 +1130,7 @@ function CoinDetailOverlay({
                   <button
                     type="button"
                     onClick={onClose}
+                    data-dialog-initial-focus="true"
                     className="rounded-lg border border-[#35527f] bg-[#13243f] px-3 py-2 text-sm font-semibold text-[#c6d8f6] hover:border-[#5578ad]"
                   >
                     Close
