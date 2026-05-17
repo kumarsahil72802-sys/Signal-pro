@@ -1,16 +1,76 @@
-# React + Vite
+# Signal Frontend (Client)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + Vite dashboard for monitoring market data, crypto news, signals, and performance stats.
 
-Currently, two official plugins are available:
+For repository-level setup, see the root guide: [../README.md](../README.md).
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Stack
 
-## React Compiler
+- React 19
+- Vite 8
+- MUI + Emotion
+- Axios
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Available Scripts
 
-## Expanding the ESLint configuration
+```bash
+npm run dev      # Start local dev server
+npm run build    # Build production bundle
+npm run preview  # Preview production build locally
+npm run lint     # Run ESLint
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## Setup
+
+### 1) Install Dependencies
+
+```bash
+npm install
+```
+
+### 2) Configure Environment
+
+Create `client/.env` (optional, but recommended):
+
+```bash
+VITE_API_BASE_URL=http://localhost:5000/api
+```
+
+If not set, the app defaults to `http://localhost:5000/api`.
+
+### 3) Run
+
+```bash
+npm run dev
+```
+
+Default local URL:
+
+- `http://localhost:5173`
+
+## Frontend-Backend Contract
+
+This client expects backend endpoints under `/api`:
+
+- `GET /signals/all`
+- `PATCH /signals/:id/take`
+- `GET /signals/stats`
+- `GET /market`
+- `GET /market/quality`
+- `GET /market/chart`
+- `GET /news`
+
+## Build for Production
+
+```bash
+npm run build
+```
+
+Output directory:
+
+- `client/dist`
+
+## Troubleshooting
+
+- If API calls fail, verify backend is running on port `5000` or update `VITE_API_BASE_URL`.
+- If CORS errors appear in production, update backend `CORS_ORIGINS`.
