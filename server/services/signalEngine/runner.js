@@ -90,7 +90,9 @@ async function runAutoLearning() {
     await ensureWinrateBaseline();
 
     // Get total count of all signals ever generated (for rate calculations)
-    const totalGenerated = await Signal.countDocuments();
+    const totalGenerated = await Signal.countDocuments({
+      status: { $ne: 'BLOCKED' }
+    });
 
     // Get TAKEN signals that are CLOSED (user took these, result is known)
     // FIXED: Use wasTaken flag to only include signals user actually took
@@ -218,6 +220,7 @@ async function runSignalSupplyGuard(createdThisCycle) {
   const lookbackStart = new Date(Date.now() - lookbackHours * 60 * 60 * 1000);
 
   const recentSignals = await Signal.countDocuments({
+    status: { $ne: 'BLOCKED' },
     createdAt: { $gte: lookbackStart }
   });
 

@@ -5,15 +5,26 @@ const Signal = require('../models/Signal');
  * - CLOSED + TARGET_HIT
  * - CLOSED + SL_HIT
  * - CLOSED + EXPIRED
+ * - CLOSED + MANUALLY_CLOSED
+ * - BLOCKED
  */
 const TTL_PARTIAL_FILTER = {
   $or: [
     { status: 'CLOSED', result: 'TARGET_HIT' },
     { status: 'CLOSED', result: 'SL_HIT' },
-    { status: 'CLOSED', result: 'EXPIRED' }
+    { status: 'CLOSED', result: 'EXPIRED' },
+    { status: 'CLOSED', result: 'MANUALLY_CLOSED' },
+    { status: 'BLOCKED' }
   ]
 };
 const OUTCOME_CLEANUP_TTL_MS = 8 * 60 * 60 * 1000;
+const CLEANUP_ELIGIBLE_CLAUSES = [
+  { status: 'CLOSED', result: 'TARGET_HIT' },
+  { status: 'CLOSED', result: 'SL_HIT' },
+  { status: 'CLOSED', result: 'EXPIRED' },
+  { status: 'CLOSED', result: 'MANUALLY_CLOSED' },
+  { status: 'BLOCKED', result: null }
+];
 
 function hasClause(clauses, expectedStatus, expectedResult = null) {
   return clauses.some((clause) => {
@@ -26,13 +37,9 @@ function hasClause(clauses, expectedStatus, expectedResult = null) {
 function hasExpectedTtlFilter(partialFilter) {
   if (!partialFilter || typeof partialFilter !== 'object') return false;
   const clauses = Array.isArray(partialFilter.$or) ? partialFilter.$or : [];
-  if (clauses.length !== 3) return false;
+  if (clauses.length !== CLEANUP_ELIGIBLE_CLAUSES.length) return false;
 
-  return (
-    hasClause(clauses, 'CLOSED', 'TARGET_HIT') &&
-    hasClause(clauses, 'CLOSED', 'SL_HIT') &&
-    hasClause(clauses, 'CLOSED', 'EXPIRED')
-  );
+  return CLEANUP_ELIGIBLE_CLAUSES.every((clause) => hasClause(clauses, clause.status, clause.result));
 }
 
 function buildBulkWriteResult(modifiedCount = 0) {
@@ -96,19 +103,22 @@ async function fallbackMigrateMissedSignals() {
   return buildBulkWriteResult(result.modifiedCount || 0);
 }
 
-async function fallbackBackfillClosedOutcomes() {
+async function fallbackBackfillCleanupEligibleSignals() {
   const signals = await Signal.find(
     {
-      status: 'CLOSED',
-      result: { $in: ['TARGET_HIT', 'SL_HIT', 'EXPIRED'] },
+      $or: [
+        { status: 'CLOSED', result: { $in: ['TARGET_HIT', 'SL_HIT', 'EXPIRED', 'MANUALLY_CLOSED'] } },
+        { status: 'BLOCKED' }
+      ],
       expireAt: { $not: { $type: 'date' } },
       $or: [
         { closedAt: { $type: 'date' } },
         { missedAt: { $type: 'date' } },
+        { persistGateBlockedAt: { $type: 'date' } },
         { createdAt: { $type: 'date' } }
       ]
     },
-    { _id: 1, closedAt: 1, missedAt: 1, createdAt: 1 }
+    { _id: 1, status: 1, closedAt: 1, missedAt: 1, persistGateBlockedAt: 1, createdAt: 1 }
   ).lean();
 
   if (signals.length === 0) {
@@ -117,16 +127,17 @@ async function fallbackBackfillClosedOutcomes() {
 
   const ops = [];
   for (const signal of signals) {
-    const closedAt = resolveClosedAt(signal);
-    if (!closedAt) continue;
+    const baseTime = signal.status === 'BLOCKED'
+      ? (signal.persistGateBlockedAt ? new Date(signal.persistGateBlockedAt) : new Date(signal.createdAt))
+      : resolveClosedAt(signal);
+    if (!baseTime || !Number.isFinite(baseTime.getTime())) continue;
 
     ops.push({
       updateOne: {
         filter: { _id: signal._id },
         update: {
           $set: {
-            closedAt,
-            expireAt: new Date(closedAt.getTime() + OUTCOME_CLEANUP_TTL_MS)
+            expireAt: new Date(baseTime.getTime() + OUTCOME_CLEANUP_TTL_MS)
           }
         }
       }
@@ -165,7 +176,7 @@ async function enforceSignalRetentionPolicy() {
           partialFilterExpression: TTL_PARTIAL_FILTER
         }
       );
-      console.log('[Retention] Created partial TTL index for TARGET_HIT + SL_HIT + EXPIRED outcomes.');
+      console.log('[Retention] Created partial TTL index for cleanup-eligible outcomes (closed outcomes + blocked).');
     }
 
     await runPipelineUpdateWithFallback({
@@ -186,15 +197,18 @@ async function enforceSignalRetentionPolicy() {
       fallback: fallbackMigrateMissedSignals
     });
 
-    const closedBackfill = await runPipelineUpdateWithFallback({
-      label: 'closed_outcome_backfill',
+    const cleanupEligibleBackfill = await runPipelineUpdateWithFallback({
+      label: 'cleanup_eligible_backfill',
       filter: {
-        status: 'CLOSED',
-        result: { $in: ['TARGET_HIT', 'SL_HIT', 'EXPIRED'] },
+        $or: [
+          { status: 'CLOSED', result: { $in: ['TARGET_HIT', 'SL_HIT', 'EXPIRED', 'MANUALLY_CLOSED'] } },
+          { status: 'BLOCKED' }
+        ],
         expireAt: { $not: { $type: 'date' } },
         $or: [
           { closedAt: { $type: 'date' } },
           { missedAt: { $type: 'date' } },
+          { persistGateBlockedAt: { $type: 'date' } },
           { createdAt: { $type: 'date' } }
         ]
       },
@@ -208,10 +222,18 @@ async function enforceSignalRetentionPolicy() {
               $toDate: {
                 $add: [
                   {
-                    $ifNull: [
-                      { $toLong: '$closedAt' },
+                    $cond: [
+                      { $eq: ['$status', 'BLOCKED'] },
                       {
-                        $ifNull: [{ $toLong: '$missedAt' }, { $toLong: '$createdAt' }]
+                        $ifNull: [{ $toLong: '$persistGateBlockedAt' }, { $toLong: '$createdAt' }]
+                      },
+                      {
+                        $ifNull: [
+                          { $toLong: '$closedAt' },
+                          {
+                            $ifNull: [{ $toLong: '$missedAt' }, { $toLong: '$createdAt' }]
+                          }
+                        ]
                       }
                     ]
                   },
@@ -222,12 +244,12 @@ async function enforceSignalRetentionPolicy() {
           }
         }
       ],
-      fallback: fallbackBackfillClosedOutcomes
+      fallback: fallbackBackfillCleanupEligibleSignals
     });
 
-    const backfilledCount = closedBackfill.modifiedCount || 0;
+    const backfilledCount = cleanupEligibleBackfill.modifiedCount || 0;
     if (backfilledCount > 0) {
-      console.log(`[Retention] Backfilled expireAt for ${backfilledCount} eligible outcomes.`);
+      console.log(`[Retention] Backfilled expireAt for ${backfilledCount} cleanup-eligible signals.`);
     }
 
     const cleanupResult = await Signal.updateMany(
@@ -235,7 +257,9 @@ async function enforceSignalRetentionPolicy() {
         $nor: [
           { status: 'CLOSED', result: 'TARGET_HIT' },
           { status: 'CLOSED', result: 'SL_HIT' },
-          { status: 'CLOSED', result: 'EXPIRED' }
+          { status: 'CLOSED', result: 'EXPIRED' },
+          { status: 'CLOSED', result: 'MANUALLY_CLOSED' },
+          { status: 'BLOCKED' }
         ],
         expireAt: { $type: 'date' }
       },

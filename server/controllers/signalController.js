@@ -219,8 +219,11 @@ const getStats = async (req, res) => {
       buildWinrateDiagnostics()
     ]);
 
-    // Get total count of all signals ever generated
-    const totalGenerated = await Signal.countDocuments();
+    // Keep generated metrics aligned to tradable lifecycle signals.
+    const [totalGenerated, totalBlocked] = await Promise.all([
+      Signal.countDocuments({ status: { $ne: 'BLOCKED' } }),
+      Signal.countDocuments({ status: 'BLOCKED' })
+    ]);
 
     // FIXED: Aggregate stats for TAKEN signals only (wasTaken: true)
     // This is the ONLY set that should count toward win rate
@@ -353,6 +356,7 @@ const getStats = async (req, res) => {
       totalMissed,
       totalExpired,
       totalGenerated,
+      totalBlocked,
       missedRate: Math.round(missedRate * 10) / 10,
       takenRate: Math.round(takenRate * 10) / 10,
       baselineWinRate: winrateDiagnostics.baselineWinRate,

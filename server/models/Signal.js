@@ -177,9 +177,11 @@ const signalSchema = new mongoose.Schema({
   contradictionList: [{ type: String }],
   validatorReasons: [{ type: String }],
   finalConfidenceBreakdown: { type: mongoose.Schema.Types.Mixed, default: null },
+  persistGateReasons: [{ type: String }],
+  persistGateBlockedAt: { type: Date, default: null },
   status: {
     type: String,
-    enum: ['ACTIVE', 'TAKEN', 'CLOSED'],
+    enum: ['ACTIVE', 'TAKEN', 'CLOSED', 'BLOCKED'],
     default: 'ACTIVE'
   },
   result: {
@@ -208,7 +210,8 @@ signalSchema.index(
         { status: 'CLOSED', result: 'TARGET_HIT' },
         { status: 'CLOSED', result: 'SL_HIT' },
         { status: 'CLOSED', result: 'EXPIRED' },
-        { status: 'CLOSED', result: 'MANUALLY_CLOSED' }
+        { status: 'CLOSED', result: 'MANUALLY_CLOSED' },
+        { status: 'BLOCKED' }
       ]
     }
   }

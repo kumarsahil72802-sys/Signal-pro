@@ -21,7 +21,15 @@ const getExpiryTimestamp = (signal) => {
     const createdTs = new Date(signal.createdAt).getTime()
     if (Number.isFinite(createdTs)) return createdTs + DEFAULT_SIGNAL_VALIDITY_MS
   }
-  if (signal.expireAt && (signal.result === 'TARGET_HIT' || signal.result === 'SL_HIT' || signal.result === 'EXPIRED')) {
+  if (
+    signal.expireAt
+    && (
+      signal.status === 'BLOCKED'
+      || signal.result === 'TARGET_HIT'
+      || signal.result === 'SL_HIT'
+      || signal.result === 'EXPIRED'
+    )
+  ) {
     const ts = new Date(signal.expireAt).getTime()
     return Number.isFinite(ts) ? ts : null
   }
@@ -248,6 +256,7 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
   const conf = signal.confidence ?? 0
   const isActive = signal.status === 'ACTIVE'
   const isTaken = signal.status === 'TAKEN'
+  const isBlocked = signal.status === 'BLOCKED'
   const isTargetHit = signal.result === 'TARGET_HIT'
   const [timeLeft, setTimeLeft] = useState('')
   const [chartInterval, setChartInterval] = useState('15m')
@@ -258,7 +267,13 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
   const expiryTimestamp = getExpiryTimestamp(signal)
   const hasActiveValidity = signal.status === 'ACTIVE' || signal.status === 'TAKEN'
   const hasCleanupTtl = Boolean(
-    signal.expireAt && (signal.result === 'TARGET_HIT' || signal.result === 'SL_HIT' || signal.result === 'EXPIRED')
+    signal.expireAt
+    && (
+      signal.status === 'BLOCKED'
+      || signal.result === 'TARGET_HIT'
+      || signal.result === 'SL_HIT'
+      || signal.result === 'EXPIRED'
+    )
   )
   const validityLabel = hasActiveValidity ? 'Valid for' : hasCleanupTtl ? 'Cleanup in' : ''
 
@@ -341,6 +356,7 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
   const rrRatio = formatRrRatio(signal)
   const riskGrade = signal.riskGrade || signal.executionIntelligence?.riskGrade || 'UNKNOWN'
   const tradeDecisionReason = signal.tradeDecisionReason || signal.executionIntelligence?.tradeDecisionReason || ''
+  const persistGateReasons = Array.isArray(signal.persistGateReasons) ? signal.persistGateReasons : []
   const skipWarningMessage = tradeDecisionReason
     ? `System recommends SKIP due to risk. ${tradeDecisionReason}`
     : 'System recommends SKIP due to risk.'
@@ -430,6 +446,14 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
               <p className="mt-3 text-xs text-[#ffb3c2] bg-[#2a1620] border border-[#6b3040] rounded-lg px-3 py-2">
                 {skipWarningMessage}
               </p>
+            )}
+            {isBlocked && (
+              <div className="mt-3 text-xs text-[#ffb3c2] bg-[#2a1620] border border-[#6b3040] rounded-lg px-3 py-2">
+                <p className="font-semibold">Blocked by final quality gate.</p>
+                {persistGateReasons.length > 0 && (
+                  <p className="mt-1 break-words">Reasons: {persistGateReasons.join(', ')}</p>
+                )}
+              </div>
             )}
 
             {isActive && (
@@ -718,11 +742,17 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
           ) : (
             <div className="p-4 bg-[#1a2740] rounded-xl border border-[#2d3f5d]">
               <p className="text-sm font-medium text-[#d1dcf0]">
+                {isBlocked && 'Blocked Signal: this setup was saved for review but rejected by persist gate.'}
                 {signal.result === 'TARGET_HIT' && 'Target Hit: this signal reached its profit target.'}
                 {signal.result === 'SL_HIT' && 'Stop Loss Hit: this signal hit the stop loss.'}
                 {signal.result === 'EXPIRED' && 'Signal Expired: validity window ended before target or stop loss.'}
-                {signal.result === 'PENDING' && 'Signal closed without target or stop loss hit.'}
+                {signal.result === 'PENDING' && !isBlocked && 'Signal closed without target or stop loss hit.'}
               </p>
+              {isBlocked && persistGateReasons.length > 0 && (
+                <p className="text-xs text-[#ffb3c2] mt-2 break-words">
+                  Gate reasons: {persistGateReasons.join(', ')}
+                </p>
+              )}
               {signal.closedAt && (
                 <p className="text-xs text-[#9cb0d2] mt-1">
                   Closed: {new Date(signal.closedAt).toLocaleString()}
@@ -744,6 +774,7 @@ const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}
   const vaultTopRef = useRef(null)
   const sectionTabsAnchorRef = useRef(null)
   const generatedRef = useRef(null)
+  const blockedRef = useRef(null)
   const targetHitRef = useRef(null)
   const slHitRef = useRef(null)
   const expiredRef = useRef(null)
@@ -789,6 +820,7 @@ const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}
   const hasMatchingSignals = filteredSignals.length > 0
 
   const generatedSignals = filteredSignals.filter((s) => s.status === 'ACTIVE' || s.status === 'TAKEN')
+  const blockedSignals = filteredSignals.filter((s) => s.status === 'BLOCKED')
   const targetHitSignals = filteredSignals.filter((s) => s.result === 'TARGET_HIT')
   const slHitSignals = filteredSignals.filter((s) => s.result === 'SL_HIT')
   const expiredSignals = filteredSignals.filter((s) => s.result === 'EXPIRED')
@@ -833,6 +865,14 @@ const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}
       </button>
       <button
         type="button"
+        onClick={() => jumpToSection(blockedRef)}
+        disabled={blockedSignals.length === 0}
+        className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#2a1620] text-[#ffb3c2] border border-[#6b3040] hover:bg-[#321b27] disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        Blocked ({blockedSignals.length})
+      </button>
+      <button
+        type="button"
         onClick={() => jumpToSection(targetHitRef)}
         disabled={targetHitSignals.length === 0}
         className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#173427] text-[#64f2b3] border border-[#2a6b4e] hover:bg-[#1c4231] disabled:opacity-40 disabled:cursor-not-allowed"
@@ -863,7 +903,7 @@ const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}
       <div ref={vaultTopRef} className="mb-6 scroll-mt-28">
         <h2 className="text-2xl font-bold text-white">Signal Vault</h2>
         <p className="text-[#8ea2c4] text-sm mt-1">
-          {generatedSignals.length} generated | {targetHitSignals.length} target hit | {slHitSignals.length} SL hit | {expiredSignals.length} expired
+          {generatedSignals.length} generated | {blockedSignals.length} blocked | {targetHitSignals.length} target hit | {slHitSignals.length} SL hit | {expiredSignals.length} expired
         </p>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <div className="flex items-center gap-2 rounded-lg border border-[#2d476e] bg-[#101f35]/90 px-3 py-2">
@@ -922,6 +962,16 @@ const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}
               Generated Signals ({generatedSignals.length})
             </h3>
             {renderSignalGroup(generatedSignals)}
+          </div>
+        )}
+
+        {blockedSignals.length > 0 && (
+          <div ref={blockedRef} className="mt-8 scroll-mt-40">
+            <h3 className="text-sm font-semibold text-[#8ea2c4] uppercase tracking-wider mb-3 flex items-center gap-2">
+              <span className="w-2 h-2 bg-[#ff8fa1] rounded-full"></span>
+              Blocked / Rejected ({blockedSignals.length})
+            </h3>
+            {renderSignalGroup(blockedSignals)}
           </div>
         )}
 

@@ -91,11 +91,11 @@ function App() {
   const coreLoopTimerRef = useRef(null)
   const newsLoopTimerRef = useRef(null)
 
-  const activeSignalCount = signals.filter((s) => s.status !== 'CLOSED').length
+  const activeSignalCount = signals.filter((s) => s.status === 'ACTIVE' || s.status === 'TAKEN').length
 
   const applySignalState = (newSignals) => {
     const safeSignals = Array.isArray(newSignals) ? newSignals : []
-    const newActiveCount = safeSignals.filter((s) => s.status !== 'CLOSED').length
+    const newActiveCount = safeSignals.filter((s) => s.status === 'ACTIVE' || s.status === 'TAKEN').length
 
     if (initialLoadDone.current && newActiveCount > prevSignalCount.current) {
       const diff = newActiveCount - prevSignalCount.current

@@ -88,8 +88,40 @@ const {
   SIGNAL_LIQUIDITY_REJECT_MODE,
   SIGNAL_AI_REJECT_MODE,
   SIGNAL_VALIDITY_MS,
-  SIGNAL_MACHINE_VERSION
+  SIGNAL_MACHINE_VERSION,
+  SIGNAL_BLOCK_UNFAVORABLE_REGIMES,
+  SIGNAL_BLOCKED_REGIMES,
+  SIGNAL_REQUIRE_TRADE_DECISION_TAKE,
+  SIGNAL_MIN_TRADE_GRADE,
+  SIGNAL_MAX_CONTRADICTION_SEVERITY,
+  SIGNAL_MIN_AGREEMENT_STRENGTH,
+  SIGNAL_MIN_FINAL_AI_CONFIDENCE
 } = settings;
+
+const TRADE_GRADE_RANK = {
+  REJECTED: 0,
+  D: 1,
+  C: 2,
+  B: 3,
+  A: 4,
+  'A+': 5
+};
+
+const CONTRADICTION_SEVERITY_RANK = {
+  NONE: 0,
+  LOW: 1,
+  ELEVATED: 2,
+  SEVERE: 3
+};
+
+const AGREEMENT_STRENGTH_RANK = {
+  UNKNOWN: 0,
+  CONFLICT: 1,
+  FRAGILE: 2,
+  ACCEPTABLE: 3,
+  STRONG: 4
+};
+const BLOCKED_SIGNAL_CLEANUP_TTL_MS = 8 * 60 * 60 * 1000;
 
 function clampConfidence(value) {
   return Math.max(0, Math.min(100, value));
@@ -519,6 +551,72 @@ function applyAiDecisionModes(adjustedSignal) {
   return adjustedSignal;
 }
 
+function normalizeTradeGrade(value) {
+  const normalized = String(value || '').trim().toUpperCase();
+  return Object.prototype.hasOwnProperty.call(TRADE_GRADE_RANK, normalized) ? normalized : 'REJECTED';
+}
+
+function normalizeContradictionSeverity(value) {
+  const normalized = String(value || '').trim().toUpperCase();
+  return Object.prototype.hasOwnProperty.call(CONTRADICTION_SEVERITY_RANK, normalized) ? normalized : 'SEVERE';
+}
+
+function normalizeAgreementStrength(value) {
+  const normalized = String(value || '').trim().toUpperCase();
+  return Object.prototype.hasOwnProperty.call(AGREEMENT_STRENGTH_RANK, normalized) ? normalized : 'UNKNOWN';
+}
+
+function isRegimeBlocked(regime) {
+  if (!SIGNAL_BLOCK_UNFAVORABLE_REGIMES) return false;
+  const normalized = String(regime || '').trim().toUpperCase();
+  if (!normalized) return false;
+  return Array.isArray(SIGNAL_BLOCKED_REGIMES) && SIGNAL_BLOCKED_REGIMES.includes(normalized);
+}
+
+function evaluateFinalPersistGate(signalData) {
+  const reasons = [];
+
+  const regime = String(signalData?.regime || '').trim().toUpperCase();
+  if (isRegimeBlocked(regime)) {
+    reasons.push(`blocked_regime_${regime}`);
+  }
+
+  if (SIGNAL_REQUIRE_TRADE_DECISION_TAKE) {
+    const decision = String(signalData?.finalTradeDecision || '').trim().toUpperCase();
+    if (decision !== 'TAKE') {
+      reasons.push(`final_trade_decision_${decision || 'UNKNOWN'}`);
+    }
+  }
+
+  const grade = normalizeTradeGrade(signalData?.tradeQualityGrade);
+  const minGrade = normalizeTradeGrade(SIGNAL_MIN_TRADE_GRADE);
+  if (TRADE_GRADE_RANK[grade] < TRADE_GRADE_RANK[minGrade]) {
+    reasons.push(`trade_grade_${grade}_below_${minGrade}`);
+  }
+
+  const severity = normalizeContradictionSeverity(signalData?.contradictionSeverity);
+  const maxSeverity = normalizeContradictionSeverity(SIGNAL_MAX_CONTRADICTION_SEVERITY);
+  if (CONTRADICTION_SEVERITY_RANK[severity] > CONTRADICTION_SEVERITY_RANK[maxSeverity]) {
+    reasons.push(`contradiction_${severity}_above_${maxSeverity}`);
+  }
+
+  const agreement = normalizeAgreementStrength(signalData?.agreementStrength);
+  const minAgreement = normalizeAgreementStrength(SIGNAL_MIN_AGREEMENT_STRENGTH);
+  if (AGREEMENT_STRENGTH_RANK[agreement] < AGREEMENT_STRENGTH_RANK[minAgreement]) {
+    reasons.push(`agreement_${agreement}_below_${minAgreement}`);
+  }
+
+  const finalAiConfidence = Number(signalData?.aiConfidence);
+  if (!Number.isFinite(finalAiConfidence) || finalAiConfidence < SIGNAL_MIN_FINAL_AI_CONFIDENCE) {
+    reasons.push(`ai_confidence_${Number.isFinite(finalAiConfidence) ? finalAiConfidence : 'NA'}_below_${SIGNAL_MIN_FINAL_AI_CONFIDENCE}`);
+  }
+
+  return {
+    allowed: reasons.length === 0,
+    reasons
+  };
+}
+
 async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN', gateCounters = null) {
   const runCheck = await canRunForCoin(coin);
   if (!runCheck.allowed) {
@@ -631,6 +729,12 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
     futuresData,
     realtimeContext
   });
+
+  if (isRegimeBlocked(regimeContext.regime || regime)) {
+    console.log(`[ENGINE] ${coin} blocked -> unfavorable regime ${regimeContext.regime || regime}`);
+    incrementGateCounter(gateCounters, 'quality_fail');
+    return null;
+  }
 
   const marketScore = await calcMarketScore(coin, trend, topCoins).catch(() => 15);
   const normalizedMarketScore = Math.round((marketScore / 30) * 30);
@@ -1090,6 +1194,40 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
     contradictionSeverity: executionDecision.contradictionSeverity,
     tradeDecisionReason: executionDecision.tradeDecisionReason
   };
+
+  const persistGate = evaluateFinalPersistGate(signalData);
+  if (!persistGate.allowed) {
+    console.log(`[ENGINE] ${coin} blocked -> final persist gate: ${persistGate.reasons.join(', ')}`);
+    try {
+      const existingBlockedSignal = await Signal.findOne({
+        coin,
+        status: 'BLOCKED',
+        result: 'PENDING'
+      }).sort({ createdAt: -1 });
+
+      if (existingBlockedSignal) {
+        console.log(`[ENGINE] ${coin} blocked signal duplicate skipped -> existing id:${existingBlockedSignal._id}`);
+        incrementGateCounter(gateCounters, 'quality_fail');
+        return null;
+      }
+
+      const blockedAt = new Date();
+      const blockedSignal = new Signal({
+        ...signalData,
+        status: 'BLOCKED',
+        result: 'PENDING',
+        persistGateReasons: persistGate.reasons,
+        persistGateBlockedAt: blockedAt,
+        expireAt: new Date(blockedAt.getTime() + BLOCKED_SIGNAL_CLEANUP_TTL_MS)
+      });
+      await blockedSignal.save();
+      console.log(`[ENGINE] ${coin} BLOCKED SIGNAL SAVED -> id:${blockedSignal._id}`);
+    } catch (blockedSaveError) {
+      console.error(`[ENGINE] ${coin} blocked signal save failed: ${blockedSaveError.message}`);
+    }
+    incrementGateCounter(gateCounters, 'quality_fail');
+    return null;
+  }
 
   const duplicateBeforeSave = await closeExpiredPendingSignals(coin);
   if (duplicateBeforeSave.hasUnresolved) {

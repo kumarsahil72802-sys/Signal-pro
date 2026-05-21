@@ -18,6 +18,14 @@ function parseEnumEnv(value, allowedValues, fallback) {
   return allowedValues.includes(normalized) ? normalized : fallback;
 }
 
+function parseCsvEnv(value, fallback = '') {
+  const source = value == null || value === '' ? fallback : value;
+  return String(source)
+    .split(',')
+    .map((item) => item.trim().toUpperCase())
+    .filter(Boolean);
+}
+
 const SIGNAL_PROFILE = (process.env.SIGNAL_PROFILE || 'BALANCED').trim().toUpperCase();
 const PROFILE_PRESETS = {
   STRICT: {
@@ -150,7 +158,7 @@ const INTERVAL = process.env.SIGNAL_INTERVAL || '1h';
 const CANDLE_COUNT = 100;
 const TREND_CANDLES = 22;
 const CHECK_INTERVAL_MS = Math.max(30 * 1000, parseNumberEnv(process.env.SIGNAL_CHECK_INTERVAL_MS, 60 * 1000));
-const SIGNAL_MONITOR_INTERVAL_MS = Math.max(15 * 1000, parseNumberEnv(process.env.SIGNAL_MONITOR_INTERVAL_MS, 60 * 1000));
+const SIGNAL_MONITOR_INTERVAL_MS = Math.max(15 * 1000, parseNumberEnv(process.env.SIGNAL_MONITOR_INTERVAL_MS, 15 * 1000));
 const SIGNAL_RECONCILE_MIN_INTERVAL_MS = Math.max(60 * 1000, parseNumberEnv(process.env.SIGNAL_RECONCILE_MIN_INTERVAL_MS, 5 * 60 * 1000));
 const CONFIDENCE_THRESHOLD_KEY = 'confidence_threshold';
 const DEFAULT_MIN_CONFIDENCE = 60;
@@ -181,6 +189,25 @@ const SIGNAL_MIN_SIGNALS_PER_DAY = Math.max(0, parseNumberEnv(process.env.SIGNAL
 const SIGNAL_SUPPLY_LOOKBACK_HOURS = Math.max(6, parseNumberEnv(process.env.SIGNAL_SUPPLY_LOOKBACK_HOURS, 24));
 const SIGNAL_SUPPLY_ADJUST_STEP = Math.max(1, parseNumberEnv(process.env.SIGNAL_SUPPLY_ADJUST_STEP, 1));
 const SIGNAL_SUPPLY_MIN_BASE_THRESHOLD = Math.max(50, Math.min(90, parseNumberEnv(process.env.SIGNAL_SUPPLY_MIN_BASE_THRESHOLD, 56)));
+const SIGNAL_BLOCK_UNFAVORABLE_REGIMES = parseBooleanEnv(process.env.SIGNAL_BLOCK_UNFAVORABLE_REGIMES, true);
+const SIGNAL_BLOCKED_REGIMES = parseCsvEnv(process.env.SIGNAL_BLOCKED_REGIMES, 'RANGING,CHOPPY,LOW_VOLATILITY');
+const SIGNAL_REQUIRE_TRADE_DECISION_TAKE = parseBooleanEnv(process.env.SIGNAL_REQUIRE_TRADE_DECISION_TAKE, true);
+const SIGNAL_MIN_TRADE_GRADE = parseEnumEnv(
+  process.env.SIGNAL_MIN_TRADE_GRADE,
+  ['A+', 'A', 'B', 'C', 'D', 'REJECTED'],
+  'B'
+);
+const SIGNAL_MAX_CONTRADICTION_SEVERITY = parseEnumEnv(
+  process.env.SIGNAL_MAX_CONTRADICTION_SEVERITY,
+  ['NONE', 'LOW', 'ELEVATED', 'SEVERE'],
+  'LOW'
+);
+const SIGNAL_MIN_AGREEMENT_STRENGTH = parseEnumEnv(
+  process.env.SIGNAL_MIN_AGREEMENT_STRENGTH,
+  ['STRONG', 'ACCEPTABLE', 'FRAGILE', 'CONFLICT', 'UNKNOWN'],
+  'ACCEPTABLE'
+);
+const SIGNAL_MIN_FINAL_AI_CONFIDENCE = Math.max(0, Math.min(100, parseNumberEnv(process.env.SIGNAL_MIN_FINAL_AI_CONFIDENCE, 68)));
 
 const STABLE_BASE_ASSETS = new Set([
   'USDT', 'USDC', 'BUSD', 'FDUSD', 'TUSD', 'USDP', 'DAI', 'USDE', 'USD1', 'PYUSD'
@@ -258,6 +285,13 @@ const settings = {
   SIGNAL_SUPPLY_LOOKBACK_HOURS,
   SIGNAL_SUPPLY_ADJUST_STEP,
   SIGNAL_SUPPLY_MIN_BASE_THRESHOLD,
+  SIGNAL_BLOCK_UNFAVORABLE_REGIMES,
+  SIGNAL_BLOCKED_REGIMES,
+  SIGNAL_REQUIRE_TRADE_DECISION_TAKE,
+  SIGNAL_MIN_TRADE_GRADE,
+  SIGNAL_MAX_CONTRADICTION_SEVERITY,
+  SIGNAL_MIN_AGREEMENT_STRENGTH,
+  SIGNAL_MIN_FINAL_AI_CONFIDENCE,
   COOLDOWN_MS,
   STABLE_BASE_ASSETS
 };

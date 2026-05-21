@@ -646,7 +646,7 @@ async function enhancedAnalyze(signal, runtime = {}) {
 
   const shouldRunSyncEnrichment = SIGNAL_AI_ENRICHMENT_TIMING === 'SYNC';
   const machineConfidence = Number(analyzed.confidence);
-  const passTrigger = Number.isFinite(machineConfidence);
+  const passTrigger = Number.isFinite(machineConfidence) && machineConfidence >= SIGNAL_AI_TRIGGER_MIN_CONFIDENCE;
 
   if (shouldRunSyncEnrichment && passTrigger) {
     [grokResult, nvidiaResult] = await Promise.all([

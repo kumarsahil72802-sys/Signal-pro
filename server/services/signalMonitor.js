@@ -113,6 +113,30 @@ async function processUnTakenStopLoss(signal, livePrice) {
   return { closed: true, targetHit: false, expired: false };
 }
 
+async function processBlockedSignalOutcome(signal, livePrice, result) {
+  const label = result === 'TARGET_HIT' ? 'Target hit' : 'Stop loss hit';
+  console.log(`[MONITOR] ${signal.coin} ${label} at ${livePrice} (blocked) -> CLOSED`);
+
+  const closedAt = new Date();
+  const expireAt = new Date(closedAt.getTime() + OUTCOME_CLEANUP_TTL_MS);
+
+  const update = {
+    status: 'CLOSED',
+    result,
+    wasTaken: false,
+    closedAt,
+    expireAt,
+    isMissedOpportunity: result === 'TARGET_HIT'
+  };
+
+  if (result === 'TARGET_HIT') {
+    update.missedAt = closedAt;
+  }
+
+  await Signal.findByIdAndUpdate(signal._id, update);
+  return { closed: true, targetHit: result === 'TARGET_HIT', expired: false };
+}
+
 async function processExpiredSignal(signal, livePrice = null) {
   const now = new Date();
   const expireAt = new Date(now.getTime() + OUTCOME_CLEANUP_TTL_MS);
@@ -158,7 +182,7 @@ async function fetchPricesForCoins(coins) {
 
 async function monitorSignals() {
   try {
-    console.log('[MONITOR] Checking active signals...');
+    console.log('[MONITOR] Checking unresolved signals...');
     lastMonitorRun = new Date();
     const nowMs = Date.now();
 
@@ -167,15 +191,20 @@ async function monitorSignals() {
       const shouldRunReconcile = !lastReconcileRunAt || elapsedSinceReconcile >= SIGNAL_RECONCILE_MIN_INTERVAL_MS;
 
       if (shouldRunReconcile) {
-        const replaySummary = await reconcileSignalsForDowntime(nowMs);
-        lastReconcileRunAt = nowMs;
-        if (replaySummary.replayAttempted || replaySummary.initialized) {
-          console.log(
-            `[MONITOR][REPLAY] reason:${replaySummary.reason} | gapMin:${(replaySummary.gapMs / 60000).toFixed(1)} | ` +
-            `scanned:${replaySummary.unresolvedScanned} | reconciled:${replaySummary.reconciledSignals} | ` +
-            `closed:${replaySummary.closedCount} | targetHit:${replaySummary.targetHitCount} | expired:${replaySummary.expiredCount} | ` +
-            `ambiguous:${replaySummary.ambiguousCount} | failed:${replaySummary.failedSignals} | checkpointUpdated:${replaySummary.checkpointUpdated ? 'YES' : 'NO'}`
-          );
+        try {
+          const replaySummary = await reconcileSignalsForDowntime(nowMs);
+          lastReconcileRunAt = nowMs;
+          if (replaySummary.replayAttempted || replaySummary.initialized) {
+            console.log(
+              `[MONITOR][REPLAY] reason:${replaySummary.reason} | gapMin:${(replaySummary.gapMs / 60000).toFixed(1)} | ` +
+              `scanned:${replaySummary.unresolvedScanned} | reconciled:${replaySummary.reconciledSignals} | ` +
+              `closed:${replaySummary.closedCount} | targetHit:${replaySummary.targetHitCount} | expired:${replaySummary.expiredCount} | ` +
+              `ambiguous:${replaySummary.ambiguousCount} | failed:${replaySummary.failedSignals} | checkpointUpdated:${replaySummary.checkpointUpdated ? 'YES' : 'NO'}`
+            );
+          }
+        } catch (replayError) {
+          // Keep monitor pass alive even if replay/checkpoint storage fails.
+          console.error(`[MONITOR][REPLAY] failed: ${replayError.message}`);
         }
       } else {
         const remainingMs = SIGNAL_RECONCILE_MIN_INTERVAL_MS - elapsedSinceReconcile;
@@ -184,11 +213,11 @@ async function monitorSignals() {
     }
 
     const signals = await Signal.find({
-      status: { $in: ['ACTIVE', 'TAKEN'] }
+      status: { $in: ['ACTIVE', 'TAKEN', 'BLOCKED'] }
     });
 
     if (signals.length === 0) {
-      console.log('[MONITOR] No active signals to monitor.');
+      console.log('[MONITOR] No unresolved signals to monitor.');
       return;
     }
 
@@ -196,8 +225,9 @@ async function monitorSignals() {
     let targetHitCount = 0;
     let expiredCount = 0;
     const processedIds = new Set();
-    // Pass 1: time-based expiry.
+    // Pass 1: time-based expiry (ACTIVE/TAKEN only).
     for (const signal of signals) {
+      if (signal.status === 'BLOCKED') continue;
       await ensureSignalValidityWindow(signal);
       const id = signal._id.toString();
       if (processedIds.has(id)) continue;
@@ -244,6 +274,8 @@ async function monitorSignals() {
         } else {
           outcome = await processUnTakenStopLoss(signal, livePrice);
         }
+      } else if (signal.status === 'BLOCKED') {
+        outcome = await processBlockedSignalOutcome(signal, livePrice, result);
       }
 
       if (!outcome) continue;

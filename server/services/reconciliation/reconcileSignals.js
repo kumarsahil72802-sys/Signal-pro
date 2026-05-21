@@ -72,6 +72,26 @@ async function applyReplayOutcome(signal, replayOutcome) {
     return { closed: true, targetHit: false, expired: false };
   }
 
+  if (signal.status === 'BLOCKED' && (replayOutcome.result === 'TARGET_HIT' || replayOutcome.result === 'SL_HIT')) {
+    const closedAt = hitAt;
+    const expireAt = new Date(closedAt.getTime() + OUTCOME_CLEANUP_TTL_MS);
+    const update = {
+      status: 'CLOSED',
+      result: replayOutcome.result,
+      wasTaken: false,
+      closedAt,
+      expireAt,
+      isMissedOpportunity: replayOutcome.result === 'TARGET_HIT'
+    };
+
+    if (replayOutcome.result === 'TARGET_HIT') {
+      update.missedAt = closedAt;
+    }
+
+    await Signal.findByIdAndUpdate(signal._id, update);
+    return { closed: true, targetHit: replayOutcome.result === 'TARGET_HIT', expired: false };
+  }
+
   return { closed: false, targetHit: false, expired: false };
 }
 
@@ -144,7 +164,7 @@ async function reconcileSignalsForDowntime(nowMs = Date.now()) {
   summary.replayAttempted = true;
 
   const unresolvedSignals = await Signal.find({
-    status: { $in: ['ACTIVE', 'TAKEN'] },
+    status: { $in: ['ACTIVE', 'TAKEN', 'BLOCKED'] },
     createdAt: { $lte: new Date(nowMs) }
   }).sort({ createdAt: 1 });
 
@@ -202,7 +222,7 @@ async function reconcileSignalsForDowntime(nowMs = Date.now()) {
         continue;
       }
 
-      if (validUntil && nowMs >= validUntil.getTime()) {
+      if (signal.status !== 'BLOCKED' && validUntil && nowMs >= validUntil.getTime()) {
         const outcome = await applyReplayExpiry(signal, validUntil);
         summary.reconciledSignals += 1;
         if (outcome.closed) summary.closedCount += 1;
