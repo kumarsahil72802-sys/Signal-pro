@@ -271,6 +271,29 @@ function incrementGateCounter(gateCounters, gate) {
   gateCounters[gate] += 1;
 }
 
+function warnInvalidSymbolOnce(runtimeContext, message) {
+  const invalidState = runtimeContext?.invalidSymbolState;
+  if (!invalidState || invalidState.warnIssued) return;
+  invalidState.warnIssued = true;
+
+  if (typeof runtimeContext?.onInvalidSymbolWarning === 'function') {
+    runtimeContext.onInvalidSymbolWarning(message);
+    return;
+  }
+
+  console.warn(`[ENGINE] ${message}`);
+}
+
+function markSymbolQuarantined(runtimeContext, symbol) {
+  const invalidState = runtimeContext?.invalidSymbolState;
+  if (!invalidState || !symbol) return;
+  if (!(invalidState.quarantinedSymbols instanceof Set)) {
+    invalidState.quarantinedSymbols = new Set();
+  }
+  invalidState.quarantinedSymbols.add(symbol);
+  invalidState.runtimeInvalidCount = Number(invalidState.runtimeInvalidCount || 0) + 1;
+}
+
 function resolvePendingSignalValidUntil(signal) {
   if (!signal) return null;
   if (signal.validUntil) {
@@ -617,10 +640,31 @@ function evaluateFinalPersistGate(signalData) {
   };
 }
 
-async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN', gateCounters = null) {
+async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN', gateCounters = null, runtimeContext = null) {
   const runCheck = await canRunForCoin(coin);
   if (!runCheck.allowed) {
     incrementGateCounter(gateCounters, runCheck.gate);
+    return null;
+  }
+
+  const tradableSet = runtimeContext?.tradableSet instanceof Set
+    ? runtimeContext.tradableSet
+    : null;
+  const invalidState = runtimeContext?.invalidSymbolState;
+
+  if (invalidState?.quarantinedSymbols instanceof Set && invalidState.quarantinedSymbols.has(coin)) {
+    incrementGateCounter(gateCounters, 'invalid_skip');
+    warnInvalidSymbolOnce(runtimeContext, `${coin} skipped -> quarantined invalid symbol for current cycle`);
+    return null;
+  }
+
+  if (tradableSet && tradableSet.size > 0 && !tradableSet.has(coin)) {
+    if (invalidState) {
+      invalidState.preflightSkipped = Number(invalidState.preflightSkipped || 0) + 1;
+      markSymbolQuarantined(runtimeContext, coin);
+    }
+    incrementGateCounter(gateCounters, 'invalid_skip');
+    warnInvalidSymbolOnce(runtimeContext, `${coin} skipped -> not in tradable Binance symbol set`);
     return null;
   }
 
@@ -628,6 +672,12 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
   try {
     klines = await getKlines(coin, INTERVAL, CANDLE_COUNT);
   } catch (err) {
+    if (err?.code === 'INVALID_SYMBOL') {
+      markSymbolQuarantined(runtimeContext, coin);
+      incrementGateCounter(gateCounters, 'invalid_skip');
+      warnInvalidSymbolOnce(runtimeContext, `${coin} skipped -> Binance INVALID_SYMBOL from kline API`);
+      return null;
+    }
     console.error(`[Engine] ${coin} error -> Failed to fetch klines: ${err.message}`);
     return null;
   }

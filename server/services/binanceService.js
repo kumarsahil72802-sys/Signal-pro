@@ -143,6 +143,26 @@ function parseOrderBookPayload(symbol, payload) {
   };
 }
 
+function buildKlinesFetchError(symbol, error) {
+  const wrapped = new Error(`Error fetching klines for ${symbol}: ${error.message}`);
+  const binanceCode = Number(error?.response?.data?.code);
+
+  if (binanceCode === -1121) {
+    wrapped.code = 'INVALID_SYMBOL';
+    wrapped.binanceCode = binanceCode;
+    wrapped.symbol = symbol;
+    wrapped.retriable = false;
+    return wrapped;
+  }
+
+  if (error?.code === 'ECONNABORTED') {
+    wrapped.code = 'REQUEST_TIMEOUT';
+    wrapped.retriable = true;
+  }
+
+  return wrapped;
+}
+
 async function getLivePrice(symbol) {
   try {
     const response = await axios.get(`${BINANCE_BASE}/ticker/price`, {
@@ -207,7 +227,7 @@ async function getKlines(symbol, interval = '1h', limit = 100, options = {}) { /
       takerBuyVolume: parseFloat(k[9])
     }));
   } catch (error) {
-    throw new Error(`Error fetching klines for ${symbol}: ${error.message}`);
+    throw buildKlinesFetchError(symbol, error);
   }
 }
 

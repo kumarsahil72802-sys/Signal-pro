@@ -3,7 +3,7 @@ const Signal = require('../../models/Signal');
 const {
   settings,
   parseTopSelector,
-  resolveCoins,
+  resolveCoinsDetailed,
   loadThresholdFromDB,
   getConfidenceThreshold,
   getEffectiveConfidenceThreshold,
@@ -267,6 +267,11 @@ async function runEngine() {
       no_trigger: 0,
       quality_fail: 0,
       fourh_block: 0,
+      invalid_skip: 0,
+      invalid_filtered: 0,
+      invalid_replaced: 0,
+      invalid_runtime: 0,
+      emergency_btc_only: 0,
       saved: 0
     };
 
@@ -286,11 +291,21 @@ async function runEngine() {
 
     // Resolve coin universe for this cycle
     let coinsToAnalyze = [];
+    let tradableSetForCycle = new Set();
     try {
-      coinsToAnalyze = await resolveCoins(topCoins);
+      const coinResolution = await resolveCoinsDetailed(topCoins);
+      coinsToAnalyze = coinResolution.coins;
+      tradableSetForCycle = coinResolution.meta?.tradableSet instanceof Set
+        ? coinResolution.meta.tradableSet
+        : new Set();
+      cycleGateCounts.invalid_filtered = Number(coinResolution.meta?.invalidFiltered || 0);
+      cycleGateCounts.invalid_replaced = Number(coinResolution.meta?.invalidReplaced || 0);
+      cycleGateCounts.emergency_btc_only = coinResolution.meta?.emergencyBtcOnly ? 1 : 0;
     } catch (err) {
       console.log(`[ENGINE] Failed to resolve coin list: ${err.message}`);
       coinsToAnalyze = ['BTCUSDT'];
+      tradableSetForCycle = new Set(['BTCUSDT']);
+      cycleGateCounts.emergency_btc_only = 1;
     }
 
     console.log(`[ENGINE] Analyzing ${coinsToAnalyze.length} coin(s). Selector: ${COIN_SELECTOR}`);
@@ -301,10 +316,21 @@ async function runEngine() {
 
     // Fetch global BTC trend once per cycle to avoid redundant API calls
     const btcTrend = await getBTCTrend();
+    const invalidSymbolState = {
+      warnIssued: false,
+      quarantinedSymbols: new Set(),
+      preflightSkipped: 0,
+      runtimeInvalidCount: 0
+    };
+    const runtimeContext = {
+      tradableSet: tradableSetForCycle,
+      invalidSymbolState,
+      onInvalidSymbolWarning: (message) => console.warn(`[ENGINE] ${message}`)
+    };
 
     for (const coin of coinsToAnalyze) {
       try {
-        const signal = await generateSignalForCoin(coin, topCoins, btcTrend, cycleGateCounts);
+        const signal = await generateSignalForCoin(coin, topCoins, btcTrend, cycleGateCounts, runtimeContext);
         if (signal) {
           created++;
           cycleGateCounts.saved += 1;
@@ -313,8 +339,9 @@ async function runEngine() {
         console.error(`[ENGINE] ${coin}: Error - ${error.message}`);
       }
     }
+    cycleGateCounts.invalid_runtime = Number(invalidSymbolState.runtimeInvalidCount || 0);
     console.log(
-      `[ENGINE] Cycle → cooldown:${cycleGateCounts.cooldown} | ranging:${cycleGateCounts.ranging} | no_trigger:${cycleGateCounts.no_trigger} | quality_fail:${cycleGateCounts.quality_fail} | fourh_block:${cycleGateCounts.fourh_block} | saved:${cycleGateCounts.saved}`
+      `[ENGINE] Cycle -> cooldown:${cycleGateCounts.cooldown} | ranging:${cycleGateCounts.ranging} | no_trigger:${cycleGateCounts.no_trigger} | quality_fail:${cycleGateCounts.quality_fail} | fourh_block:${cycleGateCounts.fourh_block} | invalid_skip:${cycleGateCounts.invalid_skip} | invalid_filtered:${cycleGateCounts.invalid_filtered} | invalid_replaced:${cycleGateCounts.invalid_replaced} | invalid_runtime:${cycleGateCounts.invalid_runtime} | emergency_btc_only:${cycleGateCounts.emergency_btc_only} | saved:${cycleGateCounts.saved}`
     );
 
     await runSignalSupplyGuard(created);

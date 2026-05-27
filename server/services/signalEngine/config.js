@@ -5,7 +5,8 @@ const {
   dedupeCoins,
   filterStableBasePairs,
   getTradableUsdtSymbolSet,
-  resolveCoins
+  resolveCoins,
+  resolveCoinsDetailed
 } = require('./configParts/coinResolver');
 const {
   loadThresholdFromDB,
@@ -36,6 +37,7 @@ module.exports = {
   filterStableBasePairs,
   getTradableUsdtSymbolSet,
   resolveCoins,
+  resolveCoinsDetailed,
   loadThresholdFromDB,
   saveThresholdToDB,
   getConfidenceThreshold,
