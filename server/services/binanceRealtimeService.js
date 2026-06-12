@@ -11,6 +11,7 @@ const state = {
   bookTickerBySymbol: new Map(),
   tradeBucketsBySymbol: new Map(),
   cumulativeCvdBySymbol: new Map(),
+  tradeListeners: new Set(),
   lastStartReason: 'not_started'
 };
 
@@ -76,6 +77,26 @@ function addTrade(symbol, payload) {
 
   const prevCvd = Number(state.cumulativeCvdBySymbol.get(symbol) || 0);
   state.cumulativeCvdBySymbol.set(symbol, prevCvd + signedQuote);
+
+  notifyTradeListeners({
+    symbol,
+    price,
+    quantity,
+    ts,
+    isBuyerMaker
+  });
+}
+
+function notifyTradeListeners(trade) {
+  if (!trade || state.tradeListeners.size === 0) return;
+
+  for (const listener of state.tradeListeners) {
+    try {
+      listener(trade);
+    } catch (error) {
+      console.error(`[Realtime] Trade listener failed: ${error.message}`);
+    }
+  }
 }
 
 function updateBookTicker(symbol, payload) {
@@ -312,9 +333,21 @@ function getRealtimeSignalContext(symbol) {
   };
 }
 
+function subscribeRealtimeTrades(listener) {
+  if (typeof listener !== 'function') {
+    return () => {};
+  }
+
+  state.tradeListeners.add(listener);
+  return () => {
+    state.tradeListeners.delete(listener);
+  };
+}
+
 module.exports = {
   startRealtimeMarketData,
   stopRealtimeMarketData,
   registerRealtimeSymbols,
-  getRealtimeSignalContext
+  getRealtimeSignalContext,
+  subscribeRealtimeTrades
 };

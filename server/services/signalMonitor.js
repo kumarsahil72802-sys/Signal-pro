@@ -3,6 +3,11 @@ const Signal = require('../models/Signal');
 const { logTrade } = require('./tradeLogger');
 const { reconcileSignalsForDowntime } = require('./reconciliation/reconcileSignals');
 const { settings } = require('./signalEngine/config');
+const {
+  startRealtimeMarketData,
+  registerRealtimeSymbols,
+  subscribeRealtimeTrades
+} = require('./binanceRealtimeService');
 
 // 8 hours cleanup TTL for short-lived outcomes shown in UI
 const OUTCOME_CLEANUP_TTL_MS = 8 * 60 * 60 * 1000;
@@ -19,6 +24,9 @@ let monitorRunning = false;
 let lastMonitorRun = null;
 let lastReconcileRunAt = 0;
 let monitorTickInProgress = false;
+let realtimeUnsubscribe = null;
+const realtimeSignalsBySymbol = new Map();
+const realtimeClosingIds = new Set();
 
 function isTargetHit(signal, livePrice) {
   return (signal.type === 'BUY' && livePrice >= signal.target) ||
@@ -163,6 +171,86 @@ async function processExpiredSignal(signal, livePrice = null) {
   return { closed: true, targetHit: false, expired: true };
 }
 
+function cacheRealtimeSignals(signals) {
+  realtimeSignalsBySymbol.clear();
+
+  for (const signal of signals) {
+    if (!signal?.coin || !signal?._id) continue;
+    const symbol = String(signal.coin).trim().toUpperCase();
+    if (!symbol) continue;
+
+    if (!realtimeSignalsBySymbol.has(symbol)) {
+      realtimeSignalsBySymbol.set(symbol, []);
+    }
+    realtimeSignalsBySymbol.get(symbol).push(signal);
+  }
+}
+
+function resolveRealtimeOutcome(signal, price) {
+  if (!signal || !Number.isFinite(price)) return null;
+
+  if (isTargetHit(signal, price)) return 'TARGET_HIT';
+  if (isStopLossHit(signal, price)) return 'SL_HIT';
+  return null;
+}
+
+async function closeSignalFromRealtime(signal, price, result) {
+  if (!signal?._id || !result) return;
+
+  const id = signal._id.toString();
+  if (realtimeClosingIds.has(id)) return;
+  realtimeClosingIds.add(id);
+
+  try {
+    const freshSignal = await Signal.findOne({
+      _id: signal._id,
+      status: { $in: ['ACTIVE', 'TAKEN', 'BLOCKED'] }
+    });
+
+    if (!freshSignal) return;
+
+    if (freshSignal.status !== 'BLOCKED') {
+      await ensureSignalValidityWindow(freshSignal);
+      if (hasSignalExpired(freshSignal, Date.now())) {
+        await processExpiredSignal(freshSignal, price);
+        return;
+      }
+    }
+
+    if (freshSignal.status === 'TAKEN') {
+      await processTakenSignal(freshSignal, price, result);
+    } else if (freshSignal.status === 'ACTIVE') {
+      if (result === 'TARGET_HIT') {
+        await processUntakenTargetHit(freshSignal, price);
+      } else {
+        await processUnTakenStopLoss(freshSignal, price);
+      }
+    } else if (freshSignal.status === 'BLOCKED') {
+      await processBlockedSignalOutcome(freshSignal, price, result);
+    }
+  } catch (error) {
+    console.error(`[MONITOR][WS] Failed to close ${signal.coin}: ${error.message}`);
+  } finally {
+    realtimeClosingIds.delete(id);
+  }
+}
+
+function handleRealtimeTrade(trade) {
+  const symbol = String(trade?.symbol || '').trim().toUpperCase();
+  const price = Number(trade?.price);
+  if (!symbol || !Number.isFinite(price) || price <= 0) return;
+
+  const signals = realtimeSignalsBySymbol.get(symbol);
+  if (!Array.isArray(signals) || signals.length === 0) return;
+
+  for (const signal of signals) {
+    const outcome = resolveRealtimeOutcome(signal, price);
+    if (!outcome) continue;
+
+    closeSignalFromRealtime(signal, price, outcome);
+  }
+}
+
 async function fetchPricesForCoins(coins) {
   if (!Array.isArray(coins) || coins.length === 0) return {};
 
@@ -226,6 +314,9 @@ async function monitorSignals() {
       .sort({ createdAt: 1 })
       .limit(SIGNAL_MONITOR_MAX_SIGNALS_PER_TICK);
 
+    cacheRealtimeSignals(signals);
+    registerRealtimeSymbols([...realtimeSignalsBySymbol.keys()]);
+
     if (signals.length === 0) {
       console.log('[MONITOR] No unresolved signals to monitor.');
       return;
@@ -237,6 +328,7 @@ async function monitorSignals() {
     const processedIds = new Set();
     // Pass 1: time-based expiry (ACTIVE/TAKEN only).
     for (const signal of signals) {
+      if (realtimeClosingIds.has(signal._id.toString())) continue;
       if (signal.status === 'BLOCKED') continue;
       await ensureSignalValidityWindow(signal);
       const id = signal._id.toString();
@@ -262,6 +354,7 @@ async function monitorSignals() {
     for (const signal of remainingSignals) {
       const id = signal._id.toString();
       if (processedIds.has(id)) continue;
+      if (realtimeClosingIds.has(id)) continue;
 
       const livePrice = prices[signal.coin];
       if (livePrice == null) continue;
@@ -305,10 +398,14 @@ async function monitorSignals() {
 
 function startSignalMonitor() {
   monitorRunning = true;
+  startRealtimeMarketData();
+  if (!realtimeUnsubscribe) {
+    realtimeUnsubscribe = subscribeRealtimeTrades(handleRealtimeTrade);
+  }
   monitorSignals();
   setInterval(monitorSignals, SIGNAL_MONITOR_INTERVAL_MS);
   console.log(
-    `[MONITOR] Started. Tick:${Math.round(SIGNAL_MONITOR_INTERVAL_MS / 1000)}s | ReplayCooldown:${Math.round(SIGNAL_RECONCILE_MIN_INTERVAL_MS / 1000)}s.`
+    `[MONITOR] Started. Tick:${Math.round(SIGNAL_MONITOR_INTERVAL_MS / 1000)}s | ReplayCooldown:${Math.round(SIGNAL_RECONCILE_MIN_INTERVAL_MS / 1000)}s | RealtimeWS:ON.`
   );
 }
 
