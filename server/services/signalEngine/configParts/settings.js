@@ -105,7 +105,7 @@ const SIGNAL_USE_4H_HARD_FILTER = parseBooleanEnv(
 const SIGNAL_AI_REJECT_MODE = (process.env.SIGNAL_AI_REJECT_MODE || PROFILE_CONFIG.aiRejectMode).trim().toUpperCase();
 const SIGNAL_AI_MODE = parseEnumEnv(process.env.SIGNAL_AI_MODE, ['ADVISORY', 'GATED'], 'ADVISORY');
 const SIGNAL_AI_ENRICHMENT_TIMING = parseEnumEnv(process.env.SIGNAL_AI_ENRICHMENT_TIMING, ['SYNC', 'ASYNC'], 'SYNC');
-const SIGNAL_AI_RETRY_COUNT = Math.max(0, Math.min(5, parseNumberEnv(process.env.SIGNAL_AI_RETRY_COUNT, 2)));
+const SIGNAL_AI_RETRY_COUNT = Math.max(0, Math.min(5, parseNumberEnv(process.env.SIGNAL_AI_RETRY_COUNT, 0)));
 const SIGNAL_AI_RETRY_BACKOFF_MS = Math.max(250, parseNumberEnv(process.env.SIGNAL_AI_RETRY_BACKOFF_MS, 1500));
 const SIGNAL_AI_TIMEOUT_MS = Math.max(1000, parseNumberEnv(process.env.SIGNAL_AI_TIMEOUT_MS, 10000));
 const SIGNAL_AI_TRIGGER_MIN_CONFIDENCE = Math.max(0, Math.min(100, parseNumberEnv(process.env.SIGNAL_AI_TRIGGER_MIN_CONFIDENCE, 60)));
@@ -158,8 +158,9 @@ const INTERVAL = process.env.SIGNAL_INTERVAL || '1h';
 const CANDLE_COUNT = 100;
 const TREND_CANDLES = 22;
 const CHECK_INTERVAL_MS = Math.max(30 * 1000, parseNumberEnv(process.env.SIGNAL_CHECK_INTERVAL_MS, 60 * 1000));
-const SIGNAL_MONITOR_INTERVAL_MS = Math.max(15 * 1000, parseNumberEnv(process.env.SIGNAL_MONITOR_INTERVAL_MS, 15 * 1000));
+const SIGNAL_MONITOR_INTERVAL_MS = Math.max(15 * 1000, parseNumberEnv(process.env.SIGNAL_MONITOR_INTERVAL_MS, 30 * 1000));
 const SIGNAL_RECONCILE_MIN_INTERVAL_MS = Math.max(60 * 1000, parseNumberEnv(process.env.SIGNAL_RECONCILE_MIN_INTERVAL_MS, 5 * 60 * 1000));
+const SIGNAL_MONITOR_MAX_SIGNALS_PER_TICK = Math.max(1, Math.floor(parseNumberEnv(process.env.SIGNAL_MONITOR_MAX_SIGNALS_PER_TICK, 250)));
 const CONFIDENCE_THRESHOLD_KEY = 'confidence_threshold';
 const DEFAULT_MIN_CONFIDENCE = 60;
 const MIN_MOMENTUM_PCT = 0.7;
@@ -172,8 +173,9 @@ const COOLDOWN_MS = SIGNAL_COOLDOWN_HOURS * 60 * 60 * 1000;
 const SIGNAL_VALIDITY_MS = SIGNAL_VALIDITY_HOURS * 60 * 60 * 1000;
 const SIGNAL_REPLAY_INTERVAL = (process.env.SIGNAL_REPLAY_INTERVAL || '1m').trim();
 const SIGNAL_REPLAY_KLINE_LIMIT = Math.min(1000, Math.max(50, Number(process.env.SIGNAL_REPLAY_KLINE_LIMIT || 1000)));
-const SIGNAL_REPLAY_MAX_GAP_HOURS = Math.max(1, Number(process.env.SIGNAL_REPLAY_MAX_GAP_HOURS || 72));
+const SIGNAL_REPLAY_MAX_GAP_HOURS = Math.max(1, Number(process.env.SIGNAL_REPLAY_MAX_GAP_HOURS || 24));
 const SIGNAL_REPLAY_RETRY_COUNT = Math.max(0, Math.min(5, Number(process.env.SIGNAL_REPLAY_RETRY_COUNT || 2)));
+// CONSERVATIVE counts same-candle target+SL touches as SL_HIT; OPTIMISTIC can be enabled explicitly for target-first replay.
 const SIGNAL_REPLAY_AMBIGUITY_POLICY = (process.env.SIGNAL_REPLAY_AMBIGUITY_POLICY || 'CONSERVATIVE').trim().toUpperCase();
 const SIGNAL_RECONCILE_ON_MONITOR = parseBooleanEnv(process.env.SIGNAL_RECONCILE_ON_MONITOR, true);
 const SIGNAL_MONITOR_CHECKPOINT_KEY = (process.env.SIGNAL_MONITOR_CHECKPOINT_KEY || 'signal_monitor_checkpoint_ms').trim();
@@ -257,6 +259,7 @@ const settings = {
   CHECK_INTERVAL_MS,
   SIGNAL_MONITOR_INTERVAL_MS,
   SIGNAL_RECONCILE_MIN_INTERVAL_MS,
+  SIGNAL_MONITOR_MAX_SIGNALS_PER_TICK,
   CONFIDENCE_THRESHOLD_KEY,
   DEFAULT_MIN_CONFIDENCE,
   MIN_MOMENTUM_PCT,

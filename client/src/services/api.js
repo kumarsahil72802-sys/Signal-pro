@@ -21,7 +21,7 @@ export const getMarketQuality = (symbols = []) => {
 export const getMarketChart = (symbol, interval = "15m", limit = 72) =>
   api.get("/market/chart", { params: { symbol, interval, limit } });
 
-export const getNews = () => api.get("/news");
+export const getNews = (limit = 24) => api.get("/news", { params: { limit } });
 export const getCoinNews = (symbol, limit = 8) =>
   api.get("/news", { params: { symbol, limit } });
 

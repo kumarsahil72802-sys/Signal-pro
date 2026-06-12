@@ -14,6 +14,7 @@ async function askGroqWithMeta(prompt, fallback = null, options = {}) {
   const retryCount = Math.max(0, Number(options.retryCount || 0));
   const retryBackoffMs = Math.max(100, Number(options.retryBackoffMs || 1000));
   const timeoutMs = Math.max(500, Number(options.timeoutMs || 10000));
+  const maxTokens = Math.max(100, Math.min(4000, Number(options.maxTokens || 300)));
 
   if (!GROQ_API_KEY) {
     console.warn('[Groq] API key not set');
@@ -38,7 +39,7 @@ async function askGroqWithMeta(prompt, fallback = null, options = {}) {
         model: 'llama-3.3-70b-versatile',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.3,
-        max_tokens: 300
+        max_tokens: maxTokens
       }, {
         headers: {
           Authorization: `Bearer ${GROQ_API_KEY}`,

@@ -4,6 +4,7 @@ const NodeCache = require('node-cache');
 const CRYPTOCOMPARE_COINLIST_URL = 'https://min-api.cryptocompare.com/data/all/coinlist';
 const COINPAPRIKA_COINS_URL = 'https://api.coinpaprika.com/v1/coins';
 const GITHUB_ICON_BASE = 'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/32/icon';
+const CRYPTOCOMPARE_API_KEY = process.env.CRYPTOCOMPARE_API_KEY;
 
 const imageCache = new NodeCache({ stdTTL: 12 * 60 * 60, checkperiod: 10 * 60 });
 
@@ -46,8 +47,15 @@ async function getCryptoCompareImageMap() {
   const cached = imageCache.get('cryptocompare_image_map');
   if (cached) return cached;
 
+  if (!CRYPTOCOMPARE_API_KEY) {
+    console.log('[CoinImage] CRYPTOCOMPARE_API_KEY missing for image map');
+  }
+
   try {
-    const response = await axios.get(CRYPTOCOMPARE_COINLIST_URL, { timeout: 12000 });
+    const response = await axios.get(CRYPTOCOMPARE_COINLIST_URL, {
+      params: CRYPTOCOMPARE_API_KEY ? { api_key: CRYPTOCOMPARE_API_KEY } : undefined,
+      timeout: 12000,
+    });
     const baseImageUrl = response?.data?.BaseImageUrl || 'https://www.cryptocompare.com';
     const rows = response?.data?.Data || {};
     const map = {};

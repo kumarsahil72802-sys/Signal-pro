@@ -87,6 +87,7 @@ const {
   SIGNAL_USE_REALTIME_CONTEXT,
   SIGNAL_LIQUIDITY_REJECT_MODE,
   SIGNAL_AI_REJECT_MODE,
+  SIGNAL_AI_ENRICHMENT_TIMING,
   SIGNAL_VALIDITY_MS,
   SIGNAL_MACHINE_VERSION,
   SIGNAL_BLOCK_UNFAVORABLE_REGIMES,
@@ -122,6 +123,8 @@ const AGREEMENT_STRENGTH_RANK = {
   STRONG: 4
 };
 const BLOCKED_SIGNAL_CLEANUP_TTL_MS = 8 * 60 * 60 * 1000;
+const UNRESOLVED_SIGNAL_STATUSES = ['ACTIVE', 'TAKEN', 'BLOCKED'];
+const EXPIRABLE_SIGNAL_STATUSES = ['ACTIVE', 'TAKEN'];
 
 function clampConfidence(value) {
   return Math.max(0, Math.min(100, value));
@@ -309,16 +312,12 @@ function resolvePendingSignalValidUntil(signal) {
 async function closeExpiredPendingSignals(coin) {
   const unresolvedSignals = await Signal.find({
     coin,
-    status: { $in: ['ACTIVE', 'TAKEN'] },
+    status: { $in: EXPIRABLE_SIGNAL_STATUSES },
     result: 'PENDING'
   });
 
-  if (!Array.isArray(unresolvedSignals) || unresolvedSignals.length === 0) {
-    return { hasUnresolved: false };
-  }
-
   const nowMs = Date.now();
-  for (const unresolvedSignal of unresolvedSignals) {
+  for (const unresolvedSignal of Array.isArray(unresolvedSignals) ? unresolvedSignals : []) {
     const validUntil = resolvePendingSignalValidUntil(unresolvedSignal);
     const validUntilMs = validUntil ? validUntil.getTime() : NaN;
     if (!Number.isFinite(validUntilMs) || validUntilMs > nowMs) continue;
@@ -334,7 +333,7 @@ async function closeExpiredPendingSignals(coin) {
 
   const stillUnresolved = await Signal.findOne({
     coin,
-    status: { $in: ['ACTIVE', 'TAKEN'] },
+    status: { $in: UNRESOLVED_SIGNAL_STATUSES },
     result: 'PENDING'
   });
 
@@ -344,7 +343,7 @@ async function closeExpiredPendingSignals(coin) {
 async function canRunForCoin(coin) {
   const pendingLifecycle = await closeExpiredPendingSignals(coin);
   if (pendingLifecycle.hasUnresolved) {
-    console.log(`[ENGINE] Duplicate signal blocked: active unresolved signal exists for ${coin}`);
+    console.log(`[ENGINE] ${coin} locked_unresolved_signal -> unresolved signal exists`);
     return { allowed: false, gate: 'cooldown' };
   }
 
@@ -638,6 +637,148 @@ function evaluateFinalPersistGate(signalData) {
     allowed: reasons.length === 0,
     reasons
   };
+}
+
+function applyFinalAdjustedToSignalData(signalData, finalAdjusted, trend) {
+  signalData.aiScore = finalAdjusted.aiScore;
+  signalData.aiConfidence = finalAdjusted.aiConfidence ?? finalAdjusted.aiScore ?? null;
+  signalData.aiDecision = finalAdjusted.aiDecision;
+  signalData.aiMessage = finalAdjusted.aiMessage;
+  signalData.groqTradeCall = finalAdjusted.groqTradeCall ?? null;
+  signalData.groqInsight = finalAdjusted.groqInsight ?? '';
+  signalData.nvidiaConfidence = finalAdjusted.nvidiaConfidence ?? null;
+  signalData.nvidiaTradeCall = finalAdjusted.nvidiaTradeCall ?? null;
+  signalData.nvidiaInsight = finalAdjusted.nvidiaInsight ?? '';
+  signalData.nvidiaStatus = finalAdjusted.nvidiaStatus || 'SKIPPED';
+  signalData.nvidiaAttempts = Number.isFinite(Number(finalAdjusted.nvidiaAttempts)) ? Number(finalAdjusted.nvidiaAttempts) : 0;
+  signalData.nvidiaError = finalAdjusted.nvidiaError || null;
+  signalData.aiStatus = finalAdjusted.aiStatus || 'SKIPPED';
+  signalData.aiAttempts = Number.isFinite(Number(finalAdjusted.aiAttempts)) ? Number(finalAdjusted.aiAttempts) : 0;
+  signalData.aiError = finalAdjusted.aiError || null;
+  signalData.machineContext = finalAdjusted.machineContext || null;
+  signalData.grokValidation = finalAdjusted.grokValidation || null;
+  signalData.nvidiaValidation = finalAdjusted.nvidiaValidation || null;
+  signalData.triCore = finalAdjusted.triCore || null;
+  signalData.finalTradeDecision = finalAdjusted.finalTradeDecision || null;
+  signalData.aiAgreementScore = Number.isFinite(Number(finalAdjusted.aiAgreementScore))
+    ? Number(finalAdjusted.aiAgreementScore)
+    : null;
+  signalData.contradictionList = Array.isArray(finalAdjusted.contradictionList)
+    ? finalAdjusted.contradictionList
+    : [];
+  signalData.validatorReasons = Array.isArray(finalAdjusted.validatorReasons)
+    ? finalAdjusted.validatorReasons
+    : [];
+  signalData.finalConfidenceBreakdown = finalAdjusted.finalConfidenceBreakdown || null;
+  applyAiRiskPlanToSignalData(signalData, trend, finalAdjusted.aiRiskPlan);
+
+  const executionDecision = finalizeExecutionDecision({
+    executionIntelligence: signalData.executionIntelligence,
+    triCore: signalData.triCore,
+    finalConfidence: signalData.aiConfidence
+  });
+  signalData.finalTradeDecision = executionDecision.finalDecision;
+  signalData.tradeQualityGrade = executionDecision.tradeQualityGrade;
+  signalData.tradeDecisionReason = executionDecision.tradeDecisionReason;
+  signalData.agreementStrength = executionDecision.agreementStrength;
+  signalData.executionRealismScore = executionDecision.executionRealismScore;
+  signalData.survivabilityScore = executionDecision.survivabilityScore;
+  signalData.contradictionSeverity = executionDecision.contradictionSeverity;
+  if (signalData.triCore && typeof signalData.triCore === 'object') {
+    signalData.triCore = {
+      ...signalData.triCore,
+      triCoreDecision: signalData.triCore.finalTradeDecision,
+      finalTradeDecision: executionDecision.finalDecision
+    };
+  }
+  signalData.executionIntelligence = {
+    ...(signalData.executionIntelligence || {}),
+    finalDecision: executionDecision.finalDecision,
+    tradeQualityGrade: executionDecision.tradeQualityGrade,
+    agreementStrength: executionDecision.agreementStrength,
+    contradictionSeverity: executionDecision.contradictionSeverity,
+    tradeDecisionReason: executionDecision.tradeDecisionReason
+  };
+
+  return signalData;
+}
+
+async function runAsyncAiValidation(signalId, signalToAdjust, trend, coin) {
+  try {
+    const adjustedSignal = await enhancedAnalyze(signalToAdjust, { forceSyncEnrichment: true });
+    if (!adjustedSignal) return;
+
+    const finalAdjusted = applyAiDecisionModes(adjustedSignal);
+    if (!finalAdjusted) return;
+
+    const nextData = applyFinalAdjustedToSignalData({ ...signalToAdjust }, finalAdjusted, trend);
+    const persistGate = evaluateFinalPersistGate(nextData);
+    const update = {
+      aiScore: nextData.aiScore,
+      aiConfidence: nextData.aiConfidence,
+      aiDecision: nextData.aiDecision,
+      aiMessage: nextData.aiMessage,
+      groqTradeCall: nextData.groqTradeCall,
+      groqInsight: nextData.groqInsight,
+      nvidiaConfidence: nextData.nvidiaConfidence,
+      nvidiaTradeCall: nextData.nvidiaTradeCall,
+      nvidiaInsight: nextData.nvidiaInsight,
+      nvidiaStatus: nextData.nvidiaStatus,
+      nvidiaAttempts: nextData.nvidiaAttempts,
+      nvidiaError: nextData.nvidiaError,
+      aiStatus: nextData.aiStatus,
+      aiAttempts: nextData.aiAttempts,
+      aiError: nextData.aiError,
+      machineContext: nextData.machineContext,
+      grokValidation: nextData.grokValidation,
+      nvidiaValidation: nextData.nvidiaValidation,
+      triCore: nextData.triCore,
+      finalTradeDecision: nextData.finalTradeDecision,
+      aiAgreementScore: nextData.aiAgreementScore,
+      contradictionList: nextData.contradictionList,
+      validatorReasons: nextData.validatorReasons,
+      finalConfidenceBreakdown: nextData.finalConfidenceBreakdown,
+      aiRiskPlan: nextData.aiRiskPlan,
+      entryPrice: nextData.entryPrice,
+      target: nextData.target,
+      stopLoss: nextData.stopLoss,
+      riskModel: nextData.riskModel,
+      rrAnalysis: nextData.rrAnalysis,
+      tradeQualityGrade: nextData.tradeQualityGrade,
+      tradeDecisionReason: nextData.tradeDecisionReason,
+      agreementStrength: nextData.agreementStrength,
+      executionRealismScore: nextData.executionRealismScore,
+      survivabilityScore: nextData.survivabilityScore,
+      contradictionSeverity: nextData.contradictionSeverity,
+      executionIntelligence: nextData.executionIntelligence,
+      persistGateReasons: persistGate.allowed ? [] : persistGate.reasons,
+      persistGateBlockedAt: persistGate.allowed ? null : new Date()
+    };
+
+    if (!persistGate.allowed) {
+      update.status = 'BLOCKED';
+      update.result = 'PENDING';
+      update.expireAt = new Date(Date.now() + BLOCKED_SIGNAL_CLEANUP_TTL_MS);
+    }
+
+    await Signal.findOneAndUpdate(
+      { _id: signalId, result: 'PENDING', status: { $in: ['ACTIVE', 'BLOCKED'] } },
+      { $set: update },
+      { new: true }
+    );
+    console.log(`[ENGINE] ${coin} async AI validation updated -> ${nextData.aiStatus}/${nextData.nvidiaStatus} | decision:${nextData.finalTradeDecision}`);
+  } catch (error) {
+    console.error(`[ENGINE] ${coin} async AI validation failed: ${error.message}`);
+    await Signal.findByIdAndUpdate(signalId, {
+      $set: {
+        aiStatus: 'FALLBACK',
+        aiError: error.message,
+        nvidiaStatus: 'FALLBACK',
+        nvidiaError: error.message,
+        aiMessage: `AI validation failed: ${error.message}`
+      }
+    });
+  }
 }
 
 async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN', gateCounters = null, runtimeContext = null) {
@@ -1179,73 +1320,30 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
     executionIntelligence
   };
 
-  const adjustedSignal = await enhancedAnalyze(signalToAdjust);
-  if (!adjustedSignal) return null;
-  const finalAdjusted = applyAiDecisionModes(adjustedSignal);
-  if (!finalAdjusted) return null;
-
-  // `aiScore` remains internal rule+history heuristic; `aiConfidence` is TriCore final confidence.
-  signalData.aiScore = finalAdjusted.aiScore;
-  signalData.aiConfidence = finalAdjusted.aiConfidence ?? finalAdjusted.aiScore ?? null;
-  signalData.aiDecision = finalAdjusted.aiDecision;
-  signalData.aiMessage = finalAdjusted.aiMessage;
-  signalData.groqTradeCall = finalAdjusted.groqTradeCall ?? null;
-  signalData.groqInsight = finalAdjusted.groqInsight ?? '';
-  signalData.nvidiaConfidence = finalAdjusted.nvidiaConfidence ?? null;
-  signalData.nvidiaTradeCall = finalAdjusted.nvidiaTradeCall ?? null;
-  signalData.nvidiaInsight = finalAdjusted.nvidiaInsight ?? '';
-  signalData.nvidiaStatus = finalAdjusted.nvidiaStatus || 'SKIPPED';
-  signalData.nvidiaAttempts = Number.isFinite(Number(finalAdjusted.nvidiaAttempts)) ? Number(finalAdjusted.nvidiaAttempts) : 0;
-  signalData.nvidiaError = finalAdjusted.nvidiaError || null;
-  signalData.aiStatus = finalAdjusted.aiStatus || 'SKIPPED';
-  signalData.aiAttempts = Number.isFinite(Number(finalAdjusted.aiAttempts)) ? Number(finalAdjusted.aiAttempts) : 0;
-  signalData.aiError = finalAdjusted.aiError || null;
-  signalData.machineContext = finalAdjusted.machineContext || null;
-  signalData.grokValidation = finalAdjusted.grokValidation || null;
-  signalData.nvidiaValidation = finalAdjusted.nvidiaValidation || null;
-  signalData.triCore = finalAdjusted.triCore || null;
-  signalData.finalTradeDecision = finalAdjusted.finalTradeDecision || null;
-  signalData.aiAgreementScore = Number.isFinite(Number(finalAdjusted.aiAgreementScore))
-    ? Number(finalAdjusted.aiAgreementScore)
-    : null;
-  signalData.contradictionList = Array.isArray(finalAdjusted.contradictionList)
-    ? finalAdjusted.contradictionList
-    : [];
-  signalData.validatorReasons = Array.isArray(finalAdjusted.validatorReasons)
-    ? finalAdjusted.validatorReasons
-    : [];
-  signalData.finalConfidenceBreakdown = finalAdjusted.finalConfidenceBreakdown || null;
-  applyAiRiskPlanToSignalData(signalData, trend, finalAdjusted.aiRiskPlan);
-
-  const executionDecision = finalizeExecutionDecision({
-    executionIntelligence: signalData.executionIntelligence,
-    triCore: signalData.triCore,
-    finalConfidence: signalData.aiConfidence
-  });
-  signalData.finalTradeDecision = executionDecision.finalDecision;
-  signalData.tradeQualityGrade = executionDecision.tradeQualityGrade;
-  signalData.tradeDecisionReason = executionDecision.tradeDecisionReason;
-  signalData.agreementStrength = executionDecision.agreementStrength;
-  signalData.executionRealismScore = executionDecision.executionRealismScore;
-  signalData.survivabilityScore = executionDecision.survivabilityScore;
-  signalData.contradictionSeverity = executionDecision.contradictionSeverity;
-  if (signalData.triCore && typeof signalData.triCore === 'object') {
-    signalData.triCore = {
-      ...signalData.triCore,
-      triCoreDecision: signalData.triCore.finalTradeDecision,
-      finalTradeDecision: executionDecision.finalDecision
-    };
+  const runAiAsync = SIGNAL_AI_ENRICHMENT_TIMING === 'ASYNC';
+  if (runAiAsync) {
+    signalData.aiStatus = 'PENDING';
+    signalData.nvidiaStatus = 'PENDING';
+    signalData.aiAttempts = 0;
+    signalData.nvidiaAttempts = 0;
+    signalData.aiError = null;
+    signalData.nvidiaError = null;
+    signalData.aiMessage = 'AI validation pending';
+    signalData.groqInsight = 'AI validation pending';
+    signalData.nvidiaInsight = 'AI validation pending';
+    signalData.finalTradeDecision = 'WAIT';
+    signalData.tradeDecisionReason = 'AI validation pending';
+    signalData.agreementStrength = 'UNKNOWN';
+    signalData.contradictionSeverity = 'LOW';
+  } else {
+    const adjustedSignal = await enhancedAnalyze(signalToAdjust);
+    if (!adjustedSignal) return null;
+    const finalAdjusted = applyAiDecisionModes(adjustedSignal);
+    if (!finalAdjusted) return null;
+    applyFinalAdjustedToSignalData(signalData, finalAdjusted, trend);
   }
-  signalData.executionIntelligence = {
-    ...(signalData.executionIntelligence || {}),
-    finalDecision: executionDecision.finalDecision,
-    tradeQualityGrade: executionDecision.tradeQualityGrade,
-    agreementStrength: executionDecision.agreementStrength,
-    contradictionSeverity: executionDecision.contradictionSeverity,
-    tradeDecisionReason: executionDecision.tradeDecisionReason
-  };
 
-  const persistGate = evaluateFinalPersistGate(signalData);
+  const persistGate = runAiAsync ? { allowed: true, reasons: [] } : evaluateFinalPersistGate(signalData);
   if (!persistGate.allowed) {
     console.log(`[ENGINE] ${coin} blocked -> final persist gate: ${persistGate.reasons.join(', ')}`);
     try {
@@ -1287,6 +1385,12 @@ async function generateSignalForCoin(coin, topCoins = null, btcTrend = 'UNKNOWN'
 
   const savedSignal = new Signal(signalData);
   await savedSignal.save();
+
+  if (runAiAsync) {
+    setImmediate(() => {
+      runAsyncAiValidation(savedSignal._id, signalToAdjust, trend, coin);
+    });
+  }
 
   try {
     await saveTradeSnapshot({

@@ -644,7 +644,7 @@ async function enhancedAnalyze(signal, runtime = {}) {
     validation: buildUnavailableValidation('nvidia', 'skipped')
   };
 
-  const shouldRunSyncEnrichment = SIGNAL_AI_ENRICHMENT_TIMING === 'SYNC';
+  const shouldRunSyncEnrichment = SIGNAL_AI_ENRICHMENT_TIMING === 'SYNC' || runtime.forceSyncEnrichment === true;
   const machineConfidence = Number(analyzed.confidence);
   const passTrigger = Number.isFinite(machineConfidence) && machineConfidence >= SIGNAL_AI_TRIGGER_MIN_CONFIDENCE;
 

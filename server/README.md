@@ -10,7 +10,7 @@ For repository-level setup, see: [../README.md](../README.md).
 - Express
 - MongoDB + Mongoose
 - Node Cron
-- External market/news providers (Binance, CryptoCompare, others via services)
+- External market providers and RSS news feeds via services
 
 ## Available Scripts
 

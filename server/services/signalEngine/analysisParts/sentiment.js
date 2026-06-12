@@ -1,4 +1,4 @@
-const { getNews } = require('../../cryptoCompareService');
+const { getNewsWithIntelligence } = require('../../newsIntelligenceService');
 const { getMacroTrendSnapshot } = require('../../macroService');
 const { settings } = require('../config');
 
@@ -31,6 +31,17 @@ function countKeywordHits(text, keywords) {
 }
 
 function scoreArticle(article, baseSymbol) {
+  if (article?.intelligence && Number.isFinite(Number(article.intelligence.impactScore))) {
+    const affectedCoins = Array.isArray(article.intelligence.affectedCoins)
+      ? article.intelligence.affectedCoins.map((coin) => String(coin).toUpperCase())
+      : [];
+    const relevance = String(article.intelligence.relevance || '').toUpperCase();
+    const relevanceWeight = relevance === 'HIGH' ? 1 : relevance === 'MEDIUM' ? 0.75 : 0.45;
+    const coinWeight = baseSymbol && affectedCoins.includes(baseSymbol) ? 1 : affectedCoins.includes('MARKET') ? 0.8 : 0.55;
+    const riskDrag = Number(article.intelligence.riskScore || 0) >= 7 ? 0.15 : 0;
+    return clamp((Number(article.intelligence.impactScore) / 10) * relevanceWeight * coinWeight - riskDrag, -1, 1);
+  }
+
   const title = normalizeText(article?.title);
   const body = normalizeText(article?.body);
   const content = `${title} ${body}`;
@@ -99,7 +110,7 @@ async function calcNewsSentiment(symbol, options = {}) {
   const categories = baseSymbol ? `${baseSymbol},BTC,ETH` : 'BTC,ETH';
   try {
     const [articles, macroSnapshot] = await Promise.all([
-      getNews(categories, SIGNAL_SENTIMENT_NEWS_LIMIT),
+      getNewsWithIntelligence(categories, SIGNAL_SENTIMENT_NEWS_LIMIT),
       getMacroTrendSnapshot()
     ]);
 
@@ -116,7 +127,9 @@ async function calcNewsSentiment(symbol, options = {}) {
       score: rawScore,
       directionalScore,
       status: 'OK',
-      source: 'news_macro_rules',
+      source: news.some((article) => article?.intelligence?.source === 'groq_multi_agent')
+        ? 'ai_news_macro'
+        : 'news_macro_rules',
       breakdown: {
         articleCount: scoredArticles.length,
         articleBias: Number(articleBias.toFixed(4)),

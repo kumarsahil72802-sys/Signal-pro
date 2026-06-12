@@ -10,13 +10,15 @@ const {
   SIGNAL_VALIDITY_MS,
   SIGNAL_RECONCILE_ON_MONITOR,
   SIGNAL_MONITOR_INTERVAL_MS,
-  SIGNAL_RECONCILE_MIN_INTERVAL_MS
+  SIGNAL_RECONCILE_MIN_INTERVAL_MS,
+  SIGNAL_MONITOR_MAX_SIGNALS_PER_TICK
 } = settings;
 
 // Monitor status for health endpoint
 let monitorRunning = false;
 let lastMonitorRun = null;
 let lastReconcileRunAt = 0;
+let monitorTickInProgress = false;
 
 function isTargetHit(signal, livePrice) {
   return (signal.type === 'BUY' && livePrice >= signal.target) ||
@@ -181,6 +183,12 @@ async function fetchPricesForCoins(coins) {
 }
 
 async function monitorSignals() {
+  if (monitorTickInProgress) {
+    console.log('[MONITOR] Previous check still running. Skipping overlapping tick.');
+    return;
+  }
+
+  monitorTickInProgress = true;
   try {
     console.log('[MONITOR] Checking unresolved signals...');
     lastMonitorRun = new Date();
@@ -214,7 +222,9 @@ async function monitorSignals() {
 
     const signals = await Signal.find({
       status: { $in: ['ACTIVE', 'TAKEN', 'BLOCKED'] }
-    });
+    })
+      .sort({ createdAt: 1 })
+      .limit(SIGNAL_MONITOR_MAX_SIGNALS_PER_TICK);
 
     if (signals.length === 0) {
       console.log('[MONITOR] No unresolved signals to monitor.');
@@ -288,6 +298,8 @@ async function monitorSignals() {
     console.log(`[MONITOR] Checked ${signals.length} signals, closed ${closedCount}, targetHit ${targetHitCount}, expired ${expiredCount}.`);
   } catch (error) {
     console.error('[MONITOR] Error:', error.message);
+  } finally {
+    monitorTickInProgress = false;
   }
 }
 
@@ -309,4 +321,9 @@ function getMonitorStatus() {
   return 'running';
 }
 
-module.exports = { startSignalMonitor, getMonitorStatus };
+module.exports = {
+  startSignalMonitor,
+  getMonitorStatus,
+  isTargetHit,
+  isStopLossHit
+};

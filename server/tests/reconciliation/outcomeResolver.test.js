@@ -55,6 +55,24 @@ test('resolveReplayOutcome: no hit keeps unresolved', () => {
   assert.equal(result.result, null);
 });
 
+test('resolveReplayOutcome: SELL target-only hit resolves TARGET_HIT', () => {
+  const signal = { type: 'SELL', target: 90, stopLoss: 105 };
+  const candles = [candle({ openTime: 1, high: 101, low: 89 })];
+
+  const result = resolveReplayOutcome(signal, candles, { ambiguityPolicy: 'CONSERVATIVE' });
+  assert.equal(result.resolved, true);
+  assert.equal(result.result, 'TARGET_HIT');
+});
+
+test('resolveReplayOutcome: SELL stop-only hit resolves SL_HIT', () => {
+  const signal = { type: 'SELL', target: 90, stopLoss: 105 };
+  const candles = [candle({ openTime: 1, high: 106, low: 91 })];
+
+  const result = resolveReplayOutcome(signal, candles, { ambiguityPolicy: 'CONSERVATIVE' });
+  assert.equal(result.resolved, true);
+  assert.equal(result.result, 'SL_HIT');
+});
+
 test('resolveSignalValidUntil: falls back to createdAt + default validity', () => {
   const createdAt = new Date('2026-01-01T00:00:00.000Z');
   const signal = { createdAt };

@@ -190,7 +190,7 @@ async function reconcileSignalsForDowntime(nowMs = Date.now()) {
         await Signal.findByIdAndUpdate(signal._id, { validUntil });
       }
 
-      const replayStartMs = Math.max(windowStartMs, createdAtMs);
+      const replayStartMs = Math.max(nowMs - maxGapMs, createdAtMs);
       const replayEndMs = validUntil
         ? Math.min(nowMs, validUntil.getTime())
         : nowMs;

@@ -55,6 +55,16 @@ const formatDateTime = (value) => {
   return parsed.toLocaleString()
 }
 
+const getSignalSortTimestamp = (signal) => {
+  const value = signal?.closedAt || signal?.updatedAt || signal?.createdAt
+  const timestamp = new Date(value).getTime()
+  return Number.isFinite(timestamp) ? timestamp : 0
+}
+
+const sortLatestClosedFirst = (signals) => (
+  signals.slice().sort((a, b) => getSignalSortTimestamp(b) - getSignalSortTimestamp(a))
+)
+
 const getExecutionClass = (quality) => {
   if (quality === 'GOOD') return 'bg-[#173427] text-[#64f2b3] border border-[#2a6b4e]'
   if (quality === 'MODERATE') return 'bg-[#3a2d10] text-[#ffd56a] border border-[#6b551f]'
@@ -67,6 +77,23 @@ const getTradeCallClass = (tradeCall) => {
   if (tradeCall === 'WAIT') return 'bg-[#3a2d10] text-[#ffd56a] border border-[#6b551f]'
   if (tradeCall === 'SKIP') return 'bg-[#3b1b26] text-[#ff8fa1] border border-[#6b3040]'
   return 'bg-[#1e2a3f] text-[#9cb1d3] border border-[#30435f]'
+}
+
+const getAiStatusClass = (status) => {
+  if (status === 'SUCCESS') return 'bg-[#173427] text-[#64f2b3] border border-[#2a6b4e]'
+  if (status === 'PENDING') return 'bg-[#19334a] text-[#8fc3ff] border border-[#2d5275]'
+  if (status === 'FALLBACK') return 'bg-[#3a2d10] text-[#ffd56a] border border-[#6b551f]'
+  if (status === 'SKIPPED') return 'bg-[#1e2a3f] text-[#9cb1d3] border border-[#30435f]'
+  return 'bg-[#3b1b26] text-[#ff8fa1] border border-[#6b3040]'
+}
+
+const compactAiReason = (value) => {
+  const text = String(value || '').trim()
+  if (!text || text === 'skipped') return ''
+  return text
+    .replace(/^rate_limited_cooldown_active_until_/, 'rate limited until ')
+    .replace(/^invalid_machine_confidence_threshold_/, 'machine confidence below AI trigger ')
+    .replace(/_/g, ' ')
 }
 
 const getDecisionClass = (decision) => {
@@ -111,6 +138,28 @@ const formatRrRatio = (signal) => {
   const ratio = Number(signal?.rrAnalysis?.ratio ?? signal?.riskModel?.realizedRR)
   if (!Number.isFinite(ratio) || ratio <= 0) return 'N/A'
   return `1:${ratio.toFixed(2)}`
+}
+
+const getTradeMovePercents = (signal) => {
+  const entryPrice = Number(signal?.entryPrice)
+  const target = Number(signal?.target)
+  const stopLoss = Number(signal?.stopLoss)
+
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0 || !Number.isFinite(target) || !Number.isFinite(stopLoss)) {
+    return { profitPercent: '0.00', lossPercent: '0.00' }
+  }
+
+  if (signal?.type === 'SELL') {
+    return {
+      profitPercent: ((entryPrice - target) / entryPrice * 100).toFixed(2),
+      lossPercent: ((stopLoss - entryPrice) / entryPrice * 100).toFixed(2)
+    }
+  }
+
+  return {
+    profitPercent: ((target - entryPrice) / entryPrice * 100).toFixed(2),
+    lossPercent: ((entryPrice - stopLoss) / entryPrice * 100).toFixed(2)
+  }
 }
 
 const getSignalQualityView = (qualityData, qualityApiFailed) => {
@@ -338,14 +387,19 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
     return 'LOW'
   }
 
-  const profitPercent = ((signal.target - signal.entryPrice) / signal.entryPrice * 100).toFixed(2)
-  const lossPercent = ((signal.stopLoss - signal.entryPrice) / signal.entryPrice * 100).toFixed(2)
+  const { profitPercent, lossPercent } = getTradeMovePercents(signal)
   const reason = signal.reason || {}
   const chartPoints = chartDataByInterval[chartInterval] || []
   const nvidiaConfidenceValue = Number(signal.nvidiaConfidence)
   const hasNvidiaConfidence = Number.isFinite(nvidiaConfidenceValue)
   const hasGroqAssessment = Boolean(signal.groqTradeCall || signal.groqInsight)
   const hasNvidiaAssessment = Boolean(signal.nvidiaTradeCall || signal.nvidiaInsight || hasNvidiaConfidence)
+  const groqStatus = String(signal.aiStatus || signal.grokValidation?.status || 'UNKNOWN').toUpperCase()
+  const nvidiaStatus = String(signal.nvidiaStatus || signal.nvidiaValidation?.status || 'UNKNOWN').toUpperCase()
+  const groqAttempts = Number(signal.aiAttempts ?? signal.grokValidation?.attempts)
+  const nvidiaAttempts = Number(signal.nvidiaAttempts ?? signal.nvidiaValidation?.attempts)
+  const groqReason = compactAiReason(signal.aiError || signal.grokValidation?.error || signal.grokValidation?.minor_risks?.[0])
+  const nvidiaReason = compactAiReason(signal.nvidiaError || signal.nvidiaValidation?.error || signal.nvidiaValidation?.minor_risks?.[0])
   const triCoreConfidence = Number.isFinite(Number(signal.aiConfidence))
     ? Number(signal.aiConfidence)
     : Number(signal.confidence || 0)
@@ -683,6 +737,17 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
                 </span>
               </div>
               <p className="text-sm text-[#c8d8f0] leading-relaxed">{signal.groqInsight || 'No comment'}</p>
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                <span className={`px-2 py-0.5 font-semibold rounded ${getAiStatusClass(groqStatus)}`}>
+                  {groqStatus}
+                </span>
+                {Number.isFinite(groqAttempts) && (
+                  <span className="text-[#8ea2c4]">Attempts: {groqAttempts}</span>
+                )}
+                {groqReason && (
+                  <span className="text-[#ffb3c2] break-words">Reason: {groqReason}</span>
+                )}
+              </div>
             </div>
           )}
 
@@ -697,6 +762,17 @@ const SignalCard = ({ signal, isExpanded, onToggle, actionLoading, onTake, quali
                 </span>
               </div>
               <p className="text-sm text-[#c8f0eb] leading-relaxed">{signal.nvidiaInsight || 'No comment'}</p>
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                <span className={`px-2 py-0.5 font-semibold rounded ${getAiStatusClass(nvidiaStatus)}`}>
+                  {nvidiaStatus}
+                </span>
+                {Number.isFinite(nvidiaAttempts) && (
+                  <span className="text-[#8ec7bf]">Attempts: {nvidiaAttempts}</span>
+                )}
+                {nvidiaReason && (
+                  <span className="text-[#ffb3c2] break-words">Reason: {nvidiaReason}</span>
+                )}
+              </div>
               <p className="mt-2 text-xs text-[#8ec7bf]">
                 Confidence: <span className="font-semibold text-[#d4fff8]">{hasNvidiaConfidence ? `${Math.round(nvidiaConfidenceValue)}%` : 'N/A'}</span>
               </p>
@@ -821,8 +897,8 @@ const Signals = ({ signals, loading, actionLoading, onTake, qualityBySymbol = {}
 
   const generatedSignals = filteredSignals.filter((s) => s.status === 'ACTIVE' || s.status === 'TAKEN')
   const blockedSignals = filteredSignals.filter((s) => s.status === 'BLOCKED')
-  const targetHitSignals = filteredSignals.filter((s) => s.result === 'TARGET_HIT')
-  const slHitSignals = filteredSignals.filter((s) => s.result === 'SL_HIT')
+  const targetHitSignals = sortLatestClosedFirst(filteredSignals.filter((s) => s.result === 'TARGET_HIT'))
+  const slHitSignals = sortLatestClosedFirst(filteredSignals.filter((s) => s.result === 'SL_HIT'))
   const expiredSignals = filteredSignals.filter((s) => s.result === 'EXPIRED')
 
   const renderSignalGroup = (groupSignals) => (

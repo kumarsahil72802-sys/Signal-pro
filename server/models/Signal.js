@@ -152,14 +152,14 @@ const signalSchema = new mongoose.Schema({
   nvidiaInsight: { type: String, default: '' },
   nvidiaStatus: {
     type: String,
-    enum: ['SUCCESS', 'FALLBACK', 'SKIPPED'],
+    enum: ['SUCCESS', 'FALLBACK', 'SKIPPED', 'PENDING'],
     default: 'SKIPPED'
   },
   nvidiaAttempts: { type: Number, default: 0, min: 0 },
   nvidiaError: { type: String, default: null },
   aiStatus: {
     type: String,
-    enum: ['SUCCESS', 'FALLBACK', 'SKIPPED'],
+    enum: ['SUCCESS', 'FALLBACK', 'SKIPPED', 'PENDING'],
     default: 'SKIPPED'
   },
   aiAttempts: { type: Number, default: 0, min: 0 },

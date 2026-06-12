@@ -1,4 +1,4 @@
-const { getNews } = require('../services/cryptoCompareService');
+const { getNewsWithIntelligence } = require('../services/newsIntelligenceService');
 
 function parseSymbol(rawSymbol) {
   const symbol = String(rawSymbol || '').trim().toUpperCase();
@@ -8,8 +8,8 @@ function parseSymbol(rawSymbol) {
 
 function parseLimit(rawLimit) {
   const parsed = Number(rawLimit);
-  if (!Number.isFinite(parsed)) return 10;
-  return Math.max(3, Math.min(20, Math.round(parsed)));
+  if (!Number.isFinite(parsed)) return 24;
+  return Math.max(3, Math.min(30, Math.round(parsed)));
 }
 
 const getCryptoNews = async (req, res) => {
@@ -17,7 +17,7 @@ const getCryptoNews = async (req, res) => {
     const symbol = parseSymbol(req.query.symbol);
     const limit = parseLimit(req.query.limit);
     const categories = symbol ? `${symbol},BTC,ETH` : 'BTC,ETH';
-    const news = await getNews(categories, limit);
+    const news = await getNewsWithIntelligence(categories, limit);
     res.json(news);
   } catch (error) {
     res.status(500).json({ message: error.message });
